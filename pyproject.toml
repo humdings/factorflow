@@ -11,6 +11,7 @@ dependencies = [
     "numpy>=2.0",
     "polars>=1.0",
     "exchange-calendars>=4.5",
+    "pandas>=2.0",
 ]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
@@ -50,6 +51,9 @@ ignore = ["RUF001", "RUF002", "RUF003"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+pythonpath = ["."]
+markers = ["slow: long-running"]
+filterwarnings = ["ignore:Series.values returning an ndarray:Warning"]
 
 [tool.pyright]
 include = ["src"]

@@ -127,20 +127,25 @@ Our version adds two things Incremental doesn't have:
 from factorflow import Pipeline, CustomFactor, inputs as I
 from factorflow.library import Returns, AverageDollarVolume, Fundamental as F
 
-universe   = AverageDollarVolume(window_length=63).top(100)                # Filter
-sector     = I.Equity.sic.to_classifier("ff12")                             # Classifier
-momentum   = Returns(window_length=252).shift(21)                           # 12-1 momentum
-value      = (F.book_equity / I.Equity.market_cap)                          # PIT-aligned automatically
-quality    = F.gross_profit_ttm / F.total_assets_avg
-composite  = (momentum.zscore(groupby=sector, mask=universe)
-              + value.winsorize(0.01, 0.99).zscore(groupby=sector, mask=universe)
-              + quality.rank(mask=universe).zscore())
+universe = AverageDollarVolume(window_length=63).top(100)  # Filter
+sector = I.Equity.sic.to_classifier("ff12")  # Classifier
+momentum = Returns(window_length=252).shift(21)  # 12-1 momentum
+value = F.book_equity / I.Equity.market_cap  # PIT-aligned automatically
+quality = F.gross_profit_ttm / F.total_assets_avg
+composite = (
+    momentum.zscore(groupby=sector, mask=universe)
+    + value.winsorize(0.01, 0.99).zscore(groupby=sector, mask=universe)
+    + quality.rank(mask=universe).zscore()
+)
 
-pipe = Pipeline(columns={"mom": momentum, "value": value, "score": composite, "sector": sector},
-                screen=universe & composite.notnull())
+pipe = Pipeline(
+    columns={"mom": momentum, "value": value, "score": composite, "sector": sector},
+    screen=universe & composite.notnull(),
+)
 
-df   = engine.run(pipe, start="2015-01-01", end="2026-10-30")             # batch: long (date, asset) Polars
-live = engine.live(pipe); live.on_update(sink_to_questdb)                  # incremental: stabilize on new data
+df = engine.run(pipe, start="2015-01-01", end="2026-10-30")  # batch: long (date, asset) Polars
+live = engine.live(pipe)
+live.on_update(sink_to_questdb)  # incremental: stabilize on new data
 ```
 
 Rules:
@@ -742,3 +747,24 @@ Rules:
 5. **Show provisional (open-row) factor values on the dashboard?**
 6. **Arb:** approve migration step 1 (dirty-strike checks in humdesk) as a separate small PR, and decide whether the arb grid should be 1 s.
 7. **Missing-bar policy** (forward-fill close and zero volume, or NaN).
+
+## 12. M0 as built (branch `m0-core`)
+
+* `src/factorflow/`: `kernels.py` (numerics), `terms.py` (Factor/Filter/Classifier
+  expressions), `graph.py` (Pipeline, CSE, topological order, look-back), `batch.py`, `live.py`
+  (ring buffers, revise/seal, exact cutoff, observers), `grid.py` (BarGrid), `bars.py`
+  (time-bar accumulator), `events.py` (tick/volume/dollar bars, adaptive thresholds, as-of
+  sampling, per-asset event pipelines), `panel.py`.
+* Exactness comes from writing each kernel once, as a function of a block of rows. Batch calls
+  it on the whole history and live calls it on the last `window` rows, so both run the same
+  IEEE operations in the same order (fixed left-to-right accumulation over the window, no
+  pairwise or BLAS reductions). Cross-sectional and recursive terms run row by row in both.
+  Transcendental ufuncs (`log`) are always computed on full rows.
+* The bar-close trigger is pluggable: the engine exposes `revise()`/`seal()`. Clock grids
+  drive it from timestamps, and event-bar builders drive it per asset. See
+  [`BARS.md`](BARS.md) for overshoot, adaptive thresholds and alignment.
+* Column-subset recomputation (only dirty names) is implemented and tested but off by default
+  (`partial_threshold=0.0`). At 500 names the per-lag Python overhead dominates, so a full
+  row is as fast. Exact cutoff (NaN-aware equality) still stops propagation through
+  unchanged nodes.
+
