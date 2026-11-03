@@ -849,5 +849,7 @@ order.
    the next trade, so an immediate revision showed a stale open row. The pipeline now writes
    the bar at construction and adds `EventPipeline.revise()`.
 3. `flake.nix` used the removed `pytestFlagsArray`, so `nix flake check` failed to evaluate on
-   current nixpkgs. It now uses `disabledTestMarks`.
+   current nixpkgs. It also referenced `exchange-calendars`, which nixpkgs does not
+   package. It now uses `disabledTestMarks` and builds exchange-calendars/pyluach from the wheels
+   pinned in `uv.lock`. `nix flake check` passes (50 tests; the slow CLI test is deselected).
 
