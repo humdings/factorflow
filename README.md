@@ -47,12 +47,85 @@ clock = ff.sample_panel({"BTC": (bars["end"], {"vol": vol_btc}), ...}, grid_ends
 ff.BatchEngine().run(ff.Pipeline({"rk": ff.Column("vol").rank()}), clock)          # cross-section
 ```
 
-Status: **M0** (engine core, numpy only). It has no data loaders or broker integration. Those
-live in the consuming application (humdesk).
+Status: **M0** (engine core, numpy only) plus a simulation and replay harness (`factorflow.sim`).
+It has no data loaders or broker integration. Those live in the consuming application (humdesk).
 
-- Design: [`docs/DESIGN.md`](docs/DESIGN.md) (the time model is in §11, M0 as built in §12);
+- Design: [`docs/DESIGN.md`](docs/DESIGN.md) (the time model is in §11, M0 as built in §12, the simulator in §13);
   bars and time paradigms: [`docs/BARS.md`](docs/BARS.md).
-- Development: `uv sync && uv run pytest && uv run ruff check`. Benchmark:
-  `uv run python benchmarks/bench_minute.py`. With Nix: `nix develop`, `nix build`, `nix flake check`.
+
+## Quickstart: the simulated market
+
+`factorflow.sim` generates a seeded synthetic market with **planted ground truth**, so the
+engine can be exercised and checked end to end without any data feed:
+
+- equities on XNYS (including early closes such as 2026-11-27, 13:00 ET), with market beta,
+  size/value/quality styles, industries (a `Classifier`), GARCH vol and Student-t shocks;
+- BTC/ETH/SOL trading 24/7;
+- Poisson trades with a U-shaped intraday profile, bid/ask bounce, illiquid names with missing
+  bars, halts and overnight gaps;
+- a planted alpha signal with a known IC (0.03).
+
+```bash
+uv sync
+uv run python -m factorflow.sim demo        # simulate, verify live == batch, validate, then a live table at 60x
+uv run python -m factorflow.sim validate    # factor / IC / backtest / bar-normality report (~5 s)
+uv run python -m factorflow.sim bench --names 100 500 --minutes 30
+uv run --group notebook jupyter lab examples/demo.ipynb   # executed notebook with plots
+```
+
+`demo` options: `--names N`, `--seed S`, `--speed X` (market seconds per wall second), `--seconds`
+(how long the live table runs), `--top`, `--skip-validation`. The CLI exits non-zero if any live row
+differs from batch.
+
+```python
+import factorflow as ff
+from factorflow.sim import SimConfig, simulate
+from factorflow.sim.pipelines import minute_pipeline
+from factorflow.sim.replay import replay, verify_replay
+from factorflow.sim.validate import validate
+
+mkt = simulate(SimConfig(seed=7).scaled(n=100))  # mkt.equities / mkt.crypto: AssetSim
+eq = mkt.equities  # .daily Panel, .trades, .truth, .halts
+panel, _ = eq.time_bars("1min")  # clock bars built from the simulated ticks
+h = 390  # warm on the first session (2026-11-25), replay the rest
+v = verify_replay(
+    minute_pipeline(),
+    panel,
+    eq.trades,
+    ff.BarGrid("XNYS", "1min"),
+    h,
+    extra_columns=("signal", "industry"),
+    check_open_every=50,
+)
+assert v.ok  # every sealed row == BatchEngine, bit for bit
+print(validate(mkt).report())  # recovered factors, IC, decile long-short, kurtosis
+```
+
+`replay(engine, trades, speed=60.0, on_revise=..., on_seal=...)` streams ticks through a `LiveEngine`
+either flat out or in accelerated real time. In accelerated mode, bars with no trades still seal on the clock.
+
+Results with seed 7, 100 names and 252 days:
+
+- **Factor recovery:** market corr 0.91 with slope 1.01; styles corr 0.81 to 0.89.
+- **Rolling beta vs true beta:** corr 0.91.
+- **Residual IC:** 0.033 ± 0.007 vs 0.030 planted.
+- **Decile long-short:** 20 bp/day, Sharpe 3.7.
+- **Excess kurtosis of intraday returns:** 1-minute bars 3.7, 5-minute 1.7, volume bars 0.27, dollar bars 0.36.
+
+Replay performance at 500 names on the demo minute pipeline (36 nodes):
+
+- **Ingest:** about 520k ticks/s.
+- **Revise latency:** about 0.7 ms.
+- **Seal latency:** about 0.35 ms.
+
+See [`docs/DESIGN.md`](docs/DESIGN.md) §13.
+
+## Development
+
+`uv sync && uv run pytest && uv run ruff check && uv run pyright`. Older micro-benchmark:
+`uv run python benchmarks/bench_minute.py`. With Nix: `nix develop`, `nix build`, `nix flake check`.
+
+CI is not enabled yet. The GitHub Actions workflow is in [`docs/ci-workflow.yml`](docs/ci-workflow.yml).
+Copy it to `.github/workflows/ci.yml` with a token that has the `workflow` scope.
 
 License: Apache-2.0.

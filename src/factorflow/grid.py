@@ -61,6 +61,8 @@ class BarGrid:
         self.grace_ns = round(g * NS)
         if self.daily and self.step != 86400 * NS:
             raise ValueError("multi-day bars are not supported; use '1d'")
+        self._cache_s: np.ndarray | None = None
+        self._cache_e: np.ndarray | None = None
 
     def __repr__(self) -> str:
         return f"BarGrid({self.calendar!r}, {self.freq!r}, grace={self.grace_ns / NS}s)"
@@ -103,14 +105,24 @@ class BarGrid:
         return np.concatenate(ss), np.concatenate(es)
 
     def bars_after(self, after_end: int, count: int = 1) -> tuple[np.ndarray, np.ndarray]:
-        """The next ``count`` bars whose end is strictly after ``after_end`` (ns)."""
+        """The next ``count`` bars whose end is strictly after ``after_end`` (ns).
+
+        The live engine calls this on every seal, so a contiguous block of bars (about a
+        month) is cached and reused while it covers the request.
+        """
+        ce = self._cache_e
+        if ce is not None and ce.size and ce[0] <= after_end:
+            k = int(np.searchsorted(ce, after_end, side="right"))
+            if ce.size - k >= count:
+                return self._cache_s[k : k + count].copy(), ce[k : k + count].copy()  # type: ignore[index]
         d = _as_date(after_end) - timedelta(days=1)
-        span = 7
+        span = 35
         while True:
             s, e = self.bars(d, d + timedelta(days=span))
-            k = np.searchsorted(e, after_end, side="right")
+            k = int(np.searchsorted(e, after_end, side="right"))
             if e.size - k >= count:
-                return s[k : k + count], e[k : k + count]
+                self._cache_s, self._cache_e = s, e
+                return s[k : k + count].copy(), e[k : k + count].copy()
             span *= 2
             if span > 4000:
                 raise ValueError("calendar exhausted; extend the exchange_calendars range")
