@@ -354,6 +354,12 @@ class EventPipeline:
         hist = history.panel(asset) if history is not None else EventBars.from_bars([]).panel(asset)
         self.engine = LiveEngine(pipeline, hist)
         self.asset = asset
+        if builder.open_bar is not None:  # a builder resumed mid-bar: its open bar is the open row
+            self._write_open(builder.open_bar)
+
+    def revise(self) -> Snapshot:
+        """Provisional values for the current open event bar without feeding a trade."""
+        return self.engine.revise()
 
     def _write_open(self, b: EventBar | None) -> None:
         f = self.engine.bar

@@ -18,8 +18,8 @@
           build-system = [ ps.hatchling ];
           dependencies = [ ps.numpy ps.polars ps.exchange-calendars ];
           nativeCheckInputs = [ ps.pytestCheckHook ps.hypothesis ];
-          # Property tests are slow-ish; keep them in CI, run the fast unit tests in the build.
-          pytestFlagsArray = [ "-m" "not slow" ];
+          # Tests marked slow (long simulations) run in CI / `uv run pytest`, not in the build.
+          disabledTestMarks = [ "slow" ];
           pythonImportsCheck = [ "factorflow" ];
         };
     in
