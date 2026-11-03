@@ -127,20 +127,25 @@ Our version adds two things Incremental doesn't have:
 from factorflow import Pipeline, CustomFactor, inputs as I
 from factorflow.library import Returns, AverageDollarVolume, Fundamental as F
 
-universe   = AverageDollarVolume(window_length=63).top(100)                # Filter
-sector     = I.Equity.sic.to_classifier("ff12")                             # Classifier
-momentum   = Returns(window_length=252).shift(21)                           # 12-1 momentum
-value      = (F.book_equity / I.Equity.market_cap)                          # PIT-aligned automatically
-quality    = F.gross_profit_ttm / F.total_assets_avg
-composite  = (momentum.zscore(groupby=sector, mask=universe)
-              + value.winsorize(0.01, 0.99).zscore(groupby=sector, mask=universe)
-              + quality.rank(mask=universe).zscore())
+universe = AverageDollarVolume(window_length=63).top(100)  # Filter
+sector = I.Equity.sic.to_classifier("ff12")  # Classifier
+momentum = Returns(window_length=252).shift(21)  # 12-1 momentum
+value = F.book_equity / I.Equity.market_cap  # PIT-aligned automatically
+quality = F.gross_profit_ttm / F.total_assets_avg
+composite = (
+    momentum.zscore(groupby=sector, mask=universe)
+    + value.winsorize(0.01, 0.99).zscore(groupby=sector, mask=universe)
+    + quality.rank(mask=universe).zscore()
+)
 
-pipe = Pipeline(columns={"mom": momentum, "value": value, "score": composite, "sector": sector},
-                screen=universe & composite.notnull())
+pipe = Pipeline(
+    columns={"mom": momentum, "value": value, "score": composite, "sector": sector},
+    screen=universe & composite.notnull(),
+)
 
-df   = engine.run(pipe, start="2015-01-01", end="2026-10-30")             # batch: long (date, asset) Polars
-live = engine.live(pipe); live.on_update(sink_to_questdb)                  # incremental: stabilize on new data
+df = engine.run(pipe, start="2015-01-01", end="2026-10-30")  # batch: long (date, asset) Polars
+live = engine.live(pipe)
+live.on_update(sink_to_questdb)  # incremental: stabilize on new data
 ```
 
 Rules:
@@ -513,9 +518,9 @@ Each phase ends with a demo and tests. Nothing goes to main without David's appr
 
 ---
 
-## 10. Industry practice notes (Northfield reference docs, 2026-11-02)
+## 10. Industry practice notes (vendor reference docs, 2026-11-02)
 
-David shared three Northfield Information Services manuals: Open Performance Attribution (about 2003), the Open Optimizer user manual (2015) and the Optimizer report formulae. My paraphrased notes are in `refs/northfield-notes.md`. They show what a mature vendor stack does. **We are not replicating it.** We borrow only these ideas.
+David shared three Northfield Information Services manuals: Open Performance Attribution (about 2003), the Open Optimizer user manual (2015) and the Optimizer report formulae. My paraphrased notes are kept outside this repository. They show what a mature vendor stack does. **We are not replicating it.** We borrow only these ideas.
 
 **Borrow:**
 1. **Separate the model from the analytics with a small, open file contract.** Their whole tool chain runs on four artifacts: factor covariance, exposures with specific risk, classifications, and per-period factor returns. Ours is a versioned set of Parquet files per model date: `exposures`, `factor_cov`, `specific_var`, `factor_returns`, plus `meta`. Attribution, risk, the optimizer, the dashboard and third-party models all read this contract, so a different model (statistical, macro, or a vendor's) can be plugged in.
@@ -742,3 +747,109 @@ Rules:
 5. **Show provisional (open-row) factor values on the dashboard?**
 6. **Arb:** approve migration step 1 (dirty-strike checks in humdesk) as a separate small PR, and decide whether the arb grid should be 1 s.
 7. **Missing-bar policy** (forward-fill close and zero volume, or NaN).
+
+## 12. M0 as built (branch `m0-core`)
+
+* `src/factorflow/`: `kernels.py` (numerics), `terms.py` (Factor/Filter/Classifier
+  expressions), `graph.py` (Pipeline, CSE, topological order, look-back), `batch.py`, `live.py`
+  (ring buffers, revise/seal, exact cutoff, observers), `grid.py` (BarGrid), `bars.py`
+  (time-bar accumulator), `events.py` (tick/volume/dollar bars, adaptive thresholds, as-of
+  sampling, per-asset event pipelines), `panel.py`.
+* Exactness comes from writing each kernel once, as a function of a block of rows. Batch calls
+  it on the whole history and live calls it on the last `window` rows, so both run the same
+  IEEE operations in the same order (fixed left-to-right accumulation over the window, no
+  pairwise or BLAS reductions). Cross-sectional and recursive terms run row by row in both.
+  Transcendental ufuncs (`log`) are always computed on full rows.
+* The bar-close trigger is pluggable: the engine exposes `revise()`/`seal()`. Clock grids
+  drive it from timestamps, and event-bar builders drive it per asset. See
+  [`BARS.md`](BARS.md) for overshoot, adaptive thresholds and alignment.
+* Column-subset recomputation (only dirty names) is implemented and tested but off by default
+  (`partial_threshold=0.0`). At 500 names the per-lag Python overhead dominates, so a full
+  row is as fast. Exact cutoff (NaN-aware equality) still stops propagation through
+  unchanged nodes.
+
+## 13. Simulation and replay harness (`factorflow.sim`)
+
+The purpose is to test the engine end to end against **known truth** before real feeds exist.
+
+**Generator (`market.py`).** Everything is seeded, so one `SimConfig` gives one market.
+
+- *Daily log returns.* r = β·f_mkt + Σ x_k f_k + g_ind + κ σ s₋₁ + σ ε.
+  - f_mkt is GARCH(1,1) with t(5) shocks.
+  - The styles are size, value and quality, with industries as `Classifier` codes.
+  - Idiosyncratic vol is GARCH.
+  - s is an AR(1) signal, z-scored each day, with κ = IC/√(1−IC²). Its risk-adjusted residual IC
+    is therefore the planted IC.
+- *Intraday sessions (the last `intraday_days`).*
+  - Trades are Poisson with a U-shaped profile times an AR(1) activity multiplier. Counts scale
+    with conditional variance.
+  - Sizes are lognormal.
+  - Prices follow a Brownian bridge in volume time, pinned to the planted close (Clark
+    subordination), plus bid/ask bounce and tick rounding.
+  - The overnight gap carries 20 % of the daily variance.
+  - Some names are illiquid (~25 trades/day), which gives missing minute bars. Halts last
+    15–60 min and reopen with a jump.
+  - Crypto (BTC/ETH/SOL) uses the same model on the 24/7 clock.
+  - Daily rows for intraday sessions are built from the ticks (`build_time_bars`), so batch and
+    live see the same bars.
+
+**Replay (`replay.py`).**
+
+- `replay()` streams trades through a `LiveEngine`:
+  - Each tick calls `advance(ts)` and then `tick()`.
+  - The engine revises every N seconds of market time or every N ticks.
+  - When a bar opens, its extra columns are set with `set_open`.
+  - With `speed=X` it sleeps against the wall clock and seals empty bars on time.
+- `verify_replay()` compares every sealed live row with `BatchEngine` using exact equality. It
+  also rebuilds sampled open revisions as batch rows (open bar = final) and checks them.
+- `verify_event_pipeline()` does the same for tick, volume and dollar `EventPipeline`s.
+
+**Validation (`validate.py`).**
+
+- Daily cross-sectional OLS on the true exposures recovers the planted factor returns.
+- The engine's rolling beta is compared with the true beta.
+- Residual, raw and rank IC of the signal are compared with the planted IC.
+- A decile long-short backtest is compared with its expected return.
+- Pooled, per-asset-standardized intraday returns of 1- and 5-minute clock bars are compared
+  with tick, volume and dollar bars. The event bars use an adaptive threshold of 78 per day.
+  The comparison reports skew, excess kurtosis and Jarque-Bera.
+
+Seed 7 results (100 names, 252 days):
+
+| Check | Result |
+|---|---|
+| Factor recovery | market corr 0.91 (slope 1.01); styles 0.81–0.89 (slopes 0.96–1.00); industries mean 0.68 |
+| Residual IC | 0.0331 ± 0.0065 vs planted 0.030 |
+| Decile long-short | 20.2 bp/day vs ≈16.4 expected; Sharpe 3.7 |
+| Excess kurtosis, equities | 1 min 3.69, 5 min 1.69, tick 0.51, volume 0.27, dollar 0.36 |
+| Excess kurtosis, crypto | 1 min 3.62, volume 0.94 |
+
+**Performance (`bench.py`).** The benchmark uses an XNYS 1-minute grid and the first 30 minutes of
+a session (the busiest part of the U-shape). Results on an 8-vCPU box with numpy 2.5:
+
+| names | pipeline (nodes) | ingest ticks/s | revise p50 | seal p50 (after revise / cold) |
+|---|---|---|---|---|
+| 100 | demo (36) | 422k | 0.58 ms | 0.20 / 0.61 ms |
+| 500 | demo (36) | 523k | 0.74 ms | 0.35 / 0.94 ms |
+| 100 | wide100 (205) | 99k | 8.8 ms | 1.05 / 7.9 ms |
+| 500 | wide100 (205) | 262k | 10.4 ms | 1.30 / 10.3 ms |
+
+`tick()` costs 1.2–1.5 µs. Revise cost is dominated by per-node, per-window-lag Python overhead,
+not by the number of names. Window kernels do O(window) numpy calls per revise (for example,
+a 240-bar beta costs about 1 ms even for 3 assets). That is the next optimization target. Exactness
+forbids pairwise reductions, but a sequential `np.add.reduce` over axis 0 would keep the same
+order.
+
+**Bugs found by the harness and fixed:**
+
+1. `BarGrid.bars_after` rebuilt the exchange calendar schedule on every seal. That took
+   ~0.33 ms per seal on XNYS minute bars and made gap fills slow. It now caches a contiguous
+   block of bars (~2 µs per call), with regression tests against a fresh grid.
+2. An `EventPipeline` built on a builder that already held an open bar ignored that bar until
+   the next trade, so an immediate revision showed a stale open row. The pipeline now writes
+   the bar at construction and adds `EventPipeline.revise()`.
+3. `flake.nix` used the removed `pytestFlagsArray`, so `nix flake check` failed to evaluate on
+   current nixpkgs. It also referenced `exchange-calendars`, which nixpkgs does not
+   package. It now uses `disabledTestMarks` and builds exchange-calendars/pyluach from the wheels
+   pinned in `uv.lock`. `nix flake check` passes (50 tests; the slow CLI test is deselected).
+
