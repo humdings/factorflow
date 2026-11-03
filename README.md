@@ -84,14 +84,21 @@ from factorflow.sim.pipelines import minute_pipeline
 from factorflow.sim.replay import replay, verify_replay
 from factorflow.sim.validate import validate
 
-mkt = simulate(SimConfig(seed=7).scaled(n=100))   # mkt.equities / mkt.crypto: AssetSim
-eq = mkt.equities                                   # .daily Panel, .trades, .truth, .halts
-panel, _ = eq.time_bars("1min")                     # clock bars built from the simulated ticks
-h = 390                                             # warm on the first session (2026-11-25), replay the rest
-v = verify_replay(minute_pipeline(), panel, eq.trades, ff.BarGrid("XNYS", "1min"), h,
-                  extra_columns=("signal", "industry"), check_open_every=50)
-assert v.ok                                         # every sealed row == BatchEngine, bit for bit
-print(validate(mkt).report())                       # recovered factors, IC, decile long-short, kurtosis
+mkt = simulate(SimConfig(seed=7).scaled(n=100))  # mkt.equities / mkt.crypto: AssetSim
+eq = mkt.equities  # .daily Panel, .trades, .truth, .halts
+panel, _ = eq.time_bars("1min")  # clock bars built from the simulated ticks
+h = 390  # warm on the first session (2026-11-25), replay the rest
+v = verify_replay(
+    minute_pipeline(),
+    panel,
+    eq.trades,
+    ff.BarGrid("XNYS", "1min"),
+    h,
+    extra_columns=("signal", "industry"),
+    check_open_every=50,
+)
+assert v.ok  # every sealed row == BatchEngine, bit for bit
+print(validate(mkt).report())  # recovered factors, IC, decile long-short, kurtosis
 ```
 
 `replay(engine, trades, speed=60.0, on_revise=..., on_seal=...)` streams ticks through a `LiveEngine`
