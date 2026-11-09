@@ -17,6 +17,16 @@
           src = builtins.fetchurl { inherit url; sha256 = hash; };
           doCheck = false;
         };
+      # interrogate is not in nixpkgs at the pinned nixos-unstable revision.
+      # The check inputs need it: tests/test_docs.py runs `python -m interrogate`.
+      interrogate = ps:
+        ps.interrogate or (wheel ps {
+          pname = "interrogate";
+          version = "1.7.0";
+          url = "https://files.pythonhosted.org/packages/12/c9/6869a1dcf4aaf309b9543ec070be3ec3adebee7c9bec9af8c230494134b9/interrogate-1.7.0-py3-none-any.whl";
+          hash = "sha256:b13ff4dd8403369670e2efe684066de9fcb868ad9d7f2b4095d8112142dc9d12";
+          dependencies = [ ps.attrs ps.click ps.colorama ps.py ps.tabulate ];
+        });
       calendarDeps = ps:
         let
           pyluach = wheel ps {
@@ -41,7 +51,7 @@
           src = self;
           build-system = [ ps.hatchling ];
           dependencies = [ ps.numpy ps.polars ps.pandas (calendarDeps ps) ];
-          nativeCheckInputs = [ ps.pytestCheckHook ps.hypothesis ];
+          nativeCheckInputs = [ ps.pytestCheckHook ps.hypothesis (interrogate ps) ];
           # Tests marked slow (long simulations) run in CI / `uv run pytest`, not in the build.
           disabledTestMarks = [ "slow" ];
           pythonImportsCheck = [ "factorflow" ];

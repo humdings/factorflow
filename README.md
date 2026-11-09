@@ -266,7 +266,9 @@ A clock grid is a calendar times a frequency:
 Information-driven bars close when a measure reaches a threshold. The measure is `1` (tick), `size` (volume), or `price * size` (dollar).
 
 ```python
-ff.build_event_bars(ts, price, size, "dollar", ff.AdaptiveDaily(bars_per_day=50, lookback_days=20, initial=1_000_000))
+ff.build_event_bars(
+    ts, price, size, "dollar", ff.AdaptiveDaily(bars_per_day=50, lookback_days=20, initial=1_000_000)
+)
 ```
 
 `Fixed(value)` holds the threshold constant. `AdaptiveDaily` sets each day's threshold from the mean daily measure over the previous `lookback_days` completed days, divided by `bars_per_day`. Days with no trades are skipped, and the threshold does not use the current day's volume. Until enough days exist, `initial` is the threshold.
