@@ -1,0 +1,27 @@
+site_name: factorflow
+site_description: Pipeline-style factor engine with batch and live execution
+repo_url: https://github.com/humdings/factorflow
+docs_dir: docs
+
+theme:
+  name: mkdocs
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: numpy
+            show_root_heading: true
+            show_source: false
+            members_order: source
+            heading_level: 2
+            filters:
+              - "!^_"
+            merge_init_into_class: true
+
+nav:
+  - Overview: index.md
+  - Bars: BARS.md
+  - API reference: api.md

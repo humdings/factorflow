@@ -45,6 +45,17 @@ STYLES = ("size", "value", "quality")
 # ====================================================================== configuration
 @dataclass(frozen=True)
 class EquitySpec:
+    """Parameters of the synthetic equity book.
+
+    Notes
+    -----
+    Volatilities (``market_vol``, ``style_vol``, ``industry_vol``, ``idio_vol``) are
+    daily log-return standard deviations, not annualized. ``ic`` is the planted
+    risk-adjusted residual information coefficient, dimensionless. Trade sizes are
+    shares. ``half_spread_bps`` is the half bid-ask spread in basis points.
+    ``tick`` is the price increment in price units.
+    """
+
     n: int = 100
     n_industries: int = 8
     style_vol: tuple[float, ...] = (0.004, 0.003, 0.0025)  # daily vol of each style factor return
@@ -73,6 +84,15 @@ class EquitySpec:
 
 @dataclass(frozen=True)
 class CryptoSpec:
+    """Parameters of the synthetic 24/7 book.
+
+    Notes
+    -----
+    ``names`` trade every UTC day. ``beta`` is exposure to the first name's factor.
+    ``idio_vol`` and ``market_vol`` are daily log-return standard deviations.
+    ``mean_trade_size`` is in coins. There is no overnight gap and no halt.
+    """
+
     names: tuple[str, ...] = ("BTC", "ETH", "SOL")
     start_price: tuple[float, ...] = (95_000.0, 3_500.0, 180.0)
     beta: tuple[float, ...] = (1.0, 1.2, 1.5)  # to the BTC factor
@@ -91,6 +111,15 @@ class CryptoSpec:
 
 @dataclass(frozen=True)
 class SimConfig:
+    """Everything :func:`simulate` needs. One config and one seed produce one market.
+
+    Notes
+    -----
+    ``end`` is the last session date, inclusive, ``YYYY-MM-DD``. ``history_days``
+    sessions have daily bars only. The following ``intraday_days`` sessions also
+    have trades. Set ``crypto`` to ``None`` to skip the 24/7 book.
+    """
+
     seed: int = 7
     end: str = "2026-11-30"  # last session (inclusive); the default window spans the 11-27 early close
     history_days: int = 252  # daily bars only
@@ -99,7 +128,20 @@ class SimConfig:
     crypto: CryptoSpec | None = field(default_factory=CryptoSpec)
 
     def scaled(self, n: int | None = None, **kw) -> SimConfig:
-        """A copy with ``n`` equities (and any other top-level fields replaced)."""
+        """Return a copy with ``n`` equities and any other fields replaced.
+
+        Parameters
+        ----------
+        n : int or None, optional
+            Equity count. ``None`` leaves it unchanged.
+        **kw
+            Other :class:`SimConfig` fields passed to ``dataclasses.replace``.
+
+        Returns
+        -------
+        SimConfig
+            A new config. The original is unchanged.
+        """
         cfg = replace(self, **kw)
         return replace(cfg, equities=replace(cfg.equities, n=n)) if n is not None else cfg
 
@@ -144,6 +186,13 @@ class AssetSim:
         return int(self.intraday[0]) if self.intraday.size else len(self.sessions)
 
     def daily_grid(self) -> BarGrid:
+        """Return the daily bar grid for this book.
+
+        Returns
+        -------
+        BarGrid
+            ``BarGrid(self.calendar, '1d')``. Grace is 0.
+        """
         return BarGrid(self.calendar, "1d")
 
     def extras(self, rows: np.ndarray) -> dict[str, np.ndarray]:
@@ -151,8 +200,21 @@ class AssetSim:
         return {k: v[rows] for k, v in self.daily.columns.items() if k in EXTRA_COLUMNS}
 
     def time_bars(self, freq: str) -> tuple[Panel, np.ndarray]:
-        """Clock bars of the intraday sessions on a ``freq`` grid, with the extra columns of
-        each bar's session. Returns ``(panel, session_row_of_each_bar)``."""
+        """Return clock bars for the intraday sessions.
+
+        Parameters
+        ----------
+        freq : str
+            Bar size, for example ``"1min"`` or ``"5min"``.
+
+        Returns
+        -------
+        panel : Panel
+            Bars built from the simulated trades, with that session's extra
+            columns (signal, industry, styles) copied onto every bar.
+        session_row : ndarray of int
+            Index into the daily panel of the session that contains each bar.
+        """
         grid = BarGrid(self.calendar, freq)
         d0, d1 = str(self.sessions[self.intraday[0]]), str(self.sessions[self.intraday[-1]])
         s, e = grid.bars(d0, d1)
@@ -169,11 +231,20 @@ EXTRA_COLUMNS = ("signal", "industry", *STYLES)
 
 @dataclass
 class SimMarket:
+    """An equity book and, unless configured off, a 24/7 book, plus the config that built them."""
+
     config: SimConfig
     equities: AssetSim
     crypto: AssetSim | None
 
     def summary(self) -> str:
+        """Describe the generated market in a few lines.
+
+        Returns
+        -------
+        str
+            Asset counts, date range, trade counts, last close, halt count, and the planted IC.
+        """
         lines = []
         for a in (self.equities, self.crypto):
             if a is None:

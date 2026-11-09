@@ -18,8 +18,22 @@ def beta_window_for(history_days: int) -> int:
 
 
 def daily_pipeline(n_assets: int, beta_window: int = 200) -> Pipeline:
-    """Daily research pipeline: returns, beta to the equal-weight market, styles, the planted
-    signal and decile screens."""
+    """Return the daily research pipeline.
+
+    Outputs are returns, beta to the equal-weight market, styles, the planted
+    signal, and decile screens.
+
+    Parameters
+    ----------
+    n_assets : int
+        Names in the book. Sets the decile width to ``max(1, n_assets // 10)``.
+    beta_window : int, optional
+        Rolling beta length in daily bars. Default is 200.
+
+    Returns
+    -------
+    Pipeline
+    """
     r = close.pct_change(1)
     logret = (close / close.shift(1)).log()
     mkt = r - r.demean()  # equal-weight market return, broadcast to every asset
@@ -85,7 +99,12 @@ def crypto_pipeline() -> Pipeline:
 
 
 def wide_pipeline(n_factors: int = 100) -> Pipeline:
-    """The 100-factor benchmark pipeline from ``benchmarks/bench_minute.py`` (with industries)."""
+    """Build the wide benchmark pipeline.
+
+    This is the 100-factor pipeline used by ``benchmarks/bench_minute.py``,
+    including industry groups. ``n_factors`` sets how many style-like terms
+    are added.
+    """
     c, v, h, lo = close, volume, high, low
     r = c.pct_change(1)
     liquid = v.rolling_mean(30) > 0

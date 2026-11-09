@@ -9,3 +9,4 @@ build/
 result
 result-*
 *.egg-info/
+site/

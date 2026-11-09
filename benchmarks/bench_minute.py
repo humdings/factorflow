@@ -23,6 +23,21 @@ import factorflow as ff
 
 
 def make_pipeline(n_factors: int, sector: ff.Classifier) -> ff.Pipeline:
+    """Build a wide minute pipeline of ``n_factors`` terms.
+
+    Parameters
+    ----------
+    n_factors : int
+        How many output columns to generate. Windows cycle through a fixed set
+        of lengths, in bars.
+    sector : Classifier
+        Industry codes used by the grouped terms.
+
+    Returns
+    -------
+    Pipeline
+        Screened to names with positive 30-bar average volume.
+    """
     c, v, h, lo = ff.BarData.close, ff.BarData.volume, ff.BarData.high, ff.BarData.low
     r = c.pct_change(1)
     liquid = v.rolling_mean(30) > 0
@@ -52,10 +67,28 @@ def make_pipeline(n_factors: int, sector: ff.Classifier) -> ff.Pipeline:
 
 
 def pct(xs: list[float], q: float) -> float:
+    """Return an empirical quantile of a small sample.
+
+    Parameters
+    ----------
+    xs : list of float
+        Observations, in seconds.
+    q : float
+        Quantile in ``[0, 1]``.
+
+    Returns
+    -------
+    float
+        ``xs`` sorted, at index ``q * len(xs)`` clipped to the last element.
+    """
     return sorted(xs)[min(len(xs) - 1, int(q * len(xs)))]
 
 
 def main() -> None:
+    """Parse arguments, time revise and seal, and print the table.
+
+    Synthetic closes are a seeded random walk. Nothing is read from disk.
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--names", type=int, default=500)
     ap.add_argument("--factors", type=int, default=100)

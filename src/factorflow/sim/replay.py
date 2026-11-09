@@ -35,6 +35,15 @@ from factorflow.panel import Panel
 
 @dataclass
 class ReplayStats:
+    """Counters from one :func:`replay` call.
+
+    Notes
+    -----
+    ``tick_s`` is seconds spent inside ``LiveEngine.tick``. ``revise_ms`` and
+    ``seal_ms`` are per-call latencies in milliseconds. ``sealed`` keeps every
+    sealed snapshot, in order. ``market_s`` is the span of trade timestamps, in seconds.
+    """
+
     n_ticks: int = 0
     wall_s: float = 0.0
     market_s: float = 0.0
@@ -46,12 +55,27 @@ class ReplayStats:
 
     @property
     def ticks_per_s(self) -> float:
+        """Return trades processed per wall-clock second.
+
+        Returns
+        -------
+        float
+            NaN if no wall time was recorded.
+        """
         return self.n_ticks / self.wall_s if self.wall_s > 0 else float("nan")
 
     def _q(self, xs: list[float], q: float) -> float:
         return float(np.quantile(xs, q)) if xs else float("nan")
 
     def summary(self) -> dict[str, float]:
+        """Return the counters as a flat dict of floats.
+
+        Returns
+        -------
+        dict of str to float
+            Includes tick throughput, speedup against real time, tick
+            microseconds, and revise and seal percentiles.
+        """
         return {
             "ticks": self.n_ticks,
             "wall_s": self.wall_s,
@@ -72,10 +96,31 @@ class Extras:
     """Row lookup for non-bar input columns: the row of the first bar end >= ``open_end``."""
 
     def __init__(self, times: np.ndarray, columns: Mapping[str, np.ndarray]):
+        """Store non-bar columns aligned to bar ends.
+
+        Parameters
+        ----------
+        times : array of int64
+            Bar ends, nanoseconds UTC, non-decreasing.
+        columns : mapping of str to ndarray
+            Each array has shape ``(T, N)``.
+        """
         self.times = np.asarray(times, np.int64)
         self.columns = dict(columns)
 
     def row(self, open_end: int) -> dict[str, np.ndarray]:
+        """Return the column row for the bar that contains ``open_end``.
+
+        Parameters
+        ----------
+        open_end : int
+            Open bar end, nanoseconds UTC.
+
+        Returns
+        -------
+        dict of str to ndarray
+            One ``(N,)`` row per column. If ``open_end`` is past the last time, the last row is used.
+        """
         r = min(int(np.searchsorted(self.times, open_end, side="left")), len(self.times) - 1)
         return {k: v[r] for k, v in self.columns.items()}
 
@@ -198,6 +243,14 @@ def _equal(a: np.ndarray, b: np.ndarray) -> bool:
 
 @dataclass
 class VerifyResult:
+    """The outcome of comparing a live replay with batch.
+
+    Notes
+    -----
+    ``mismatches`` is empty when every checked row matched.
+    ``sealed_rows`` is how many bars the live engine sealed.
+    """
+
     grid: str
     sealed_rows: int
     open_checked: int
@@ -206,6 +259,13 @@ class VerifyResult:
 
     @property
     def ok(self) -> bool:
+        """Return whether the replay matched and sealed at least one row.
+
+        Returns
+        -------
+        bool
+            ``True`` when ``mismatches`` is empty and ``sealed_rows > 0``.
+        """
         return not self.mismatches and self.sealed_rows > 0
 
 

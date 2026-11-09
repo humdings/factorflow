@@ -29,11 +29,44 @@ BAR_INPUTS = (*FIELDS, "has_trade")
 
 
 class RowBuffer:
-    """Sealed tail (``keep`` rows) + one open slot, contiguous for zero-copy windows."""
+    """Sealed tail plus one open slot, stored so a window is a view.
+
+    Parameters
+    ----------
+    keep : int
+        How many sealed rows to retain. This is ``lookback - 1``: the rows
+        before the open row that a consumer's window still needs.
+    n : int
+        Number of assets.
+    dtype : numpy dtype
+        Stored dtype. Factors are float64, filters bool, classifiers int64.
+    missing
+        Value used to fill slots that history did not cover. NaN, ``False``,
+        or ``-1`` depending on the term.
+    history : ndarray of shape (T, N) or None
+        Sealed output to warm from. The last ``keep`` rows are copied in.
+        ``None`` or a short history leaves the older slots at ``missing``,
+        which is the warmup a batch run would also show.
+    """
 
     __slots__ = ("cap", "data", "keep", "pos")
 
     def __init__(self, keep: int, n: int, dtype, missing, history: np.ndarray | None):
+        """Allocate the ring and copy the sealed tail.
+
+        Parameters
+        ----------
+        keep : int
+            Sealed rows to retain.
+        n : int
+            Number of assets.
+        dtype : numpy dtype
+            Stored dtype.
+        missing
+            Fill value for slots history does not cover.
+        history : ndarray or None
+            Prior sealed output. Only the last ``keep`` rows are kept.
+        """
         self.keep = keep
         self.cap = max(2 * (keep + 1), keep + 64)
         self.data = np.full((self.cap, n), missing, dtype=dtype)
@@ -43,13 +76,41 @@ class RowBuffer:
             self.data[keep - tail.shape[0] : keep] = tail
 
     def window(self, w: int) -> np.ndarray:
+        """Return the last ``w`` rows, ending at the open slot.
+
+        Parameters
+        ----------
+        w : int
+            Window length in bars, including the open row. The live engine
+            passes a term's own ``window``, so the view is exactly what
+            batch would pad out to the same length.
+
+        Returns
+        -------
+        ndarray of shape (w, N)
+            A view. Row ``-1`` is the open slot.
+        """
         return self.data[self.pos - w + 1 : self.pos + 1]
 
     @property
     def open(self) -> np.ndarray:
+        """The open slot.
+
+        Returns
+        -------
+        ndarray of shape (N,)
+            A view. Writes here are the provisional row.
+        """
         return self.data[self.pos]
 
     def seal(self) -> None:
+        """Commit the open slot and open the next one.
+
+        The new open slot starts as a copy of the row just sealed, which is
+        the forward-filled close for bar fields until a tick overwrites it.
+        When the buffer is full, the last ``keep`` sealed rows slide to the
+        front. Older rows are dropped; consumers only needed ``keep`` of them.
+        """
         self.pos += 1
         if self.pos == self.cap:
             k = self.keep
@@ -60,6 +121,27 @@ class RowBuffer:
 
 @dataclass
 class Snapshot:
+    """One pipeline row, either provisional or sealed.
+
+    Parameters
+    ----------
+    ts : int
+        Bar end, nanoseconds UTC. For an open clock bar this is the end the
+        bar will have once it seals, not the timestamp of the last trade.
+    is_open : bool
+        ``True`` while the bar can still change. ``False`` after :meth:`LiveEngine.seal`.
+    values : dict of str to ndarray
+        Named outputs, each shape ``(N,)``. Copies, so later ticks do not
+        mutate a snapshot the caller kept.
+    screen : ndarray of bool, shape (N,), or None
+        The screen on this row, or ``None`` if the pipeline has no screen.
+    changed : frozenset of str
+        Output names whose values differ from the previous snapshot. Empty
+        when nothing a watcher cares about moved. NaN equals NaN for this test.
+    assets : tuple of str, optional
+        Asset names, column order of the arrays.
+    """
+
     ts: int  # bar end (label), ns UTC
     is_open: bool  # True = provisional (open bar), False = sealed
     values: dict[str, np.ndarray]
@@ -68,6 +150,15 @@ class Snapshot:
     assets: tuple[str, ...] = field(default=())
 
     def frame(self) -> pl.DataFrame:
+        """Stack this row into a one-bar long frame.
+
+        Returns
+        -------
+        polars.DataFrame
+            Columns ``ts``, ``asset``, ``is_open``, and each output. Assets
+            that fail the screen are omitted. With no screen, every asset is
+            present.
+        """
         keep = self.screen if self.screen is not None else np.ones(len(self.assets), dtype=bool)
         idx = np.flatnonzero(keep)
         data = {
@@ -106,6 +197,34 @@ class LiveEngine:
         observers: Sequence[Observer] = (),
         partial_threshold: float = 0.0,
     ):
+        """Warm from ``history`` and open the next bar.
+
+        Parameters
+        ----------
+        pipeline : Pipeline or Graph
+            What to run. Compiled once, here.
+        history : Panel
+            Sealed bars. Must include every input the pipeline reads, and
+            should be at least as long as the longest window or the early
+            live rows stay missing, the same way batch warmup is missing.
+        grid : BarGrid or None, optional
+            Clock that seals bars from timestamps. ``None`` means the caller
+            seals with :meth:`seal` (event bars do this).
+        observers : sequence of callable, optional
+            Each is called with a :class:`Snapshot` when a revise changes an
+            output, and on every seal. Default is none.
+        partial_threshold : float, optional
+            Fraction of assets. Column-wise terms recompute only the dirty
+            columns when fewer than this fraction changed. ``0`` recomputes
+            the whole row, which is faster at a few hundred names because
+            the Python loop over lags dominates. Default is ``0``.
+
+        Raises
+        ------
+        KeyError
+            If ``history`` lacks a column the pipeline reads. Raised while
+            the batch warm-up runs.
+        """
         self.graph = pipeline if isinstance(pipeline, Graph) else compile_pipeline(pipeline)
         self.assets = history.assets
         self.asset_index = {a: i for i, a in enumerate(self.assets)}
@@ -161,7 +280,27 @@ class LiveEngine:
         return asset if isinstance(asset, (int, np.integer)) else self.asset_index[asset]  # type: ignore[return-value]
 
     def tick(self, asset: str | int, ts: int, price: float, size: float = 0.0) -> None:
-        """A trade. With a grid, seals any bars that are now past ``end + grace`` first."""
+        """Fold one trade into the open bar.
+
+        Parameters
+        ----------
+        asset : str or int
+            Asset name, or a column index.
+        ts : int
+            Trade time, nanoseconds UTC.
+        price : float
+            Trade price, in the caller's price units.
+        size : float, optional
+            Trade size. Default is 0, which still counts as a tick and moves
+            the close. Volume does not increase.
+
+        Notes
+        -----
+        With a grid, bars whose ``end + grace`` is at or before ``ts`` are
+        sealed first. A trade stamped at or after the open bar's end is held
+        and applied after that seal. A trade older than the last sealed bar
+        is dropped and counted in :attr:`late_ticks`.
+        """
         j = self._j(asset)
         if self.grid is not None:
             self.advance(ts)
@@ -186,12 +325,47 @@ class LiveEngine:
         dollar: float | None = None,
         n_ticks: float | None = None,
     ) -> None:
+        """Replace one asset's open OHLCV bar.
+
+        Parameters
+        ----------
+        asset : str or int
+            Asset name, or a column index.
+        open, high, low, close : float
+            The in-progress bar's prices.
+        volume : float
+            Volume so far, in the caller's size units.
+        dollar : float or None, optional
+            Dollar volume. ``None`` stores ``close * volume``.
+        n_ticks : float or None, optional
+            Trade count. ``None`` stores 1 when ``volume > 0``, else 0.
+
+        Notes
+        -----
+        Does not seal. Call :meth:`revise` to recompute factors. The asset
+        is marked dirty.
+        """
         j = self._j(asset)
         self.bar.set_bar(j, open, high, low, close, volume, dollar, n_ticks)
         self._dirty[j] = True
 
     def set_open(self, column: str, values: np.ndarray | Mapping[str | int, float]) -> None:
-        """Set a non-bar input column for the open bar (full row array or {asset: value})."""
+        """Set a column of the open bar that is not implied by trades.
+
+        Parameters
+        ----------
+        column : str
+            An input the pipeline reads. Bar fields (``open``, ``close``, ...)
+            and extra columns (a sector code, a signal) are both accepted.
+            The column must already be an input; this does not add outputs.
+        values : ndarray of shape (N,) or mapping
+            A full row, or ``{asset: value}`` for a subset. Dtype follows the
+            stored column (float64 for factors, int64 for classifiers).
+
+        Notes
+        -----
+        Assets whose value changed are marked dirty. Call :meth:`revise` afterwards.
+        """
         f = self.bar.f[column] if column in BAR_INPUTS else self.extra[column]
         if isinstance(values, Mapping):
             for a, v in values.items():
@@ -204,6 +378,13 @@ class LiveEngine:
             f[:] = arr
 
     def set_open_bar_fields(self, fields: Mapping[str, np.ndarray]) -> None:
+        """Set several open-bar columns at once.
+
+        Parameters
+        ----------
+        fields : mapping of str to ndarray
+            Each value is a full row, passed to :meth:`set_open`.
+        """
         for k, v in fields.items():
             self.set_open(k, v)
 
@@ -246,6 +427,10 @@ class LiveEngine:
                 else:
                     cols = None
                     blocks = [self.bufs[i].window(w) for i in t.inputs]
+                # ``compute`` returns ``T_in - window + 1`` rows. This call
+                # passes exactly ``window`` rows (sealed tail + open slot), so
+                # the result has one row: the same arithmetic as the last row
+                # of a batch run that treats this open bar as final.
                 new = t.compute(blocks)[0]
             out = buf.open
             if fresh:
@@ -275,7 +460,20 @@ class LiveEngine:
         return Snapshot(int(stamp), is_open, vals, screen, names, self.assets)
 
     def revise(self) -> Snapshot:
-        """Recompute the open bar's row (no sealed state changes). Notifies observers on change."""
+        """Recompute the open bar.
+
+        Returns
+        -------
+        Snapshot
+            ``is_open`` is ``True``. Sealed rows are not modified, so calling
+            this twice with no new input returns the same values. Observers
+            run only when an output changed.
+
+        Notes
+        -----
+        A revision equals a batch run on the sealed history plus this open
+        bar appended as a final row.
+        """
         changed = self._recompute()
         snap = self._snapshot(changed, True, None)
         if snap.changed:
@@ -284,7 +482,30 @@ class LiveEngine:
         return snap
 
     def seal(self, ts: int | None = None) -> Snapshot:
-        """Make the open bar permanent and open the next one (missing bars carry the close)."""
+        """Commit the open bar and start the next one.
+
+        Parameters
+        ----------
+        ts : int or None, optional
+            Bar end, nanoseconds UTC. ``None`` uses the grid's open-bar end.
+            Required when the engine was built without a grid.
+
+        Returns
+        -------
+        Snapshot
+            The row just sealed, with ``is_open`` False. Observers always run.
+
+        Raises
+        ------
+        ValueError
+            If ``ts`` is omitted and there is no grid.
+
+        Notes
+        -----
+        Assets with no trade keep the previous close and get zero volume.
+        Trades that arrived during the grace period, stamped into the next
+        bar, are applied after the seal.
+        """
         changed = self._recompute()
         if ts is None:
             if self.open_end is None:
@@ -310,7 +531,21 @@ class LiveEngine:
         return snap
 
     def advance(self, now: int) -> list[Snapshot]:
-        """Seal every bar whose ``end + grace <= now`` (empty bars are forward-filled)."""
+        """Seal every bar whose grace has elapsed.
+
+        Parameters
+        ----------
+        now : int
+            Current time, nanoseconds UTC. A bar seals when
+            ``now >= end + grace``. Empty bars are sealed too, carrying the
+            close forward.
+
+        Returns
+        -------
+        list of Snapshot
+            One sealed snapshot per bar closed by this call, in time order.
+            Empty if nothing was due, or if the engine has no grid.
+        """
         out: list[Snapshot] = []
         if self.grid is None:
             return out

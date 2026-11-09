@@ -48,9 +48,10 @@
         };
     in
     {
-      # humdesk: inputs.factorflow.url = "github:humdings/factorflow";
-      #          nixpkgs.overlays = [ inputs.factorflow.overlays.default ];
-      #          then python3.pkgs.factorflow is available.
+      # Downstream Nix consumers:
+      #   inputs.factorflow.url = "github:humdings/factorflow";
+      #   nixpkgs.overlays = [ inputs.factorflow.overlays.default ];
+      #   python3.pkgs.factorflow is then available.
       overlays.default = final: prev: {
         pythonPackagesExtensions = (prev.pythonPackagesExtensions or [ ]) ++ [
           (pyfinal: pyprev: { factorflow = mkFactorflow pyfinal; })

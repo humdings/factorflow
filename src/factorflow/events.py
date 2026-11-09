@@ -50,14 +50,46 @@ OVERSHOOT = ("close", "split")
 
 
 def utc_day(ts: int) -> int:
+    """Return the UTC day index of a timestamp.
+
+    Parameters
+    ----------
+    ts : int
+        Nanoseconds since the Unix epoch, UTC.
+
+    Returns
+    -------
+    int
+        ``ts // (86400 * 1e9)``. The default day key for adaptive thresholds.
+    """
     return int(ts) // (86400 * NS)
 
 
 @dataclass(frozen=True)
 class Fixed:
+    """A threshold that does not change.
+
+    Parameters
+    ----------
+    value : float
+        The threshold, in the bar's measure (ticks, size, or price times size). Must be positive.
+
+    Raises
+    ------
+    ValueError
+        If ``value`` is not positive. Raised from ``__post_init__``.
+    """
+
     value: float
 
     def __post_init__(self) -> None:
+        """Reject a non-positive threshold.
+
+        Raises
+        ------
+        ValueError
+            If ``value`` is not greater than 0.
+        """
         if not self.value > 0:
             raise ValueError("threshold must be > 0")
 
@@ -73,6 +105,13 @@ class AdaptiveDaily:
     floor: float = 0.0  # lower bound on the threshold
 
     def __post_init__(self) -> None:
+        """Reject a non-positive target or a non-positive lookback.
+
+        Raises
+        ------
+        ValueError
+            If ``bars_per_day``, ``lookback_days``, or ``min_days`` is not positive.
+        """
         if self.bars_per_day <= 0 or self.lookback_days < 1 or self.min_days < 1:
             raise ValueError("bad AdaptiveDaily parameters")
 
@@ -82,6 +121,16 @@ Threshold = Fixed | AdaptiveDaily
 
 @dataclass
 class EventBar:
+    """One sealed or open information-driven bar for a single asset.
+
+    Notes
+    -----
+    Prices are in the caller's price units. ``volume`` is the sum of trade sizes.
+    ``dollar`` is the sum of price times size. ``n_ticks`` is the trade count.
+    ``threshold`` is the threshold that was in force when the bar closed, or the
+    current threshold if the bar is still open. Times are nanoseconds UTC.
+    """
+
     start: int
     end: int
     open: float
@@ -94,6 +143,13 @@ class EventBar:
     threshold: float
 
     def as_tuple(self) -> tuple:
+        """Return the fields in ``EVENT_FIELDS`` order.
+
+        Returns
+        -------
+        tuple
+            start, end, open, high, low, close, volume, dollar, n_ticks, threshold.
+        """
         return tuple(getattr(self, k) for k in EVENT_FIELDS)
 
 
@@ -107,6 +163,26 @@ class EventBarBuilder:
         overshoot: str = "close",
         day_key: Callable[[int], int] = utc_day,
     ):
+        """Start an empty builder.
+
+        Parameters
+        ----------
+        kind : str, optional
+            ``tick``, ``volume``, or ``dollar``. Default is ``volume``.
+        threshold : Fixed, AdaptiveDaily, or float, optional
+            A float becomes ``Fixed(threshold)``. Default is 1000.
+        overshoot : str, optional
+            ``close`` (default) keeps the whole crossing trade in the bar it
+            finishes. ``split`` cuts that trade so each bar holds exactly the
+            threshold. Tick bars cannot split.
+        day_key : callable, optional
+            ``ts -> day id`` for adaptive thresholds. Default is :func:`utc_day`.
+
+        Raises
+        ------
+        ValueError
+            If ``kind`` or ``overshoot`` is unknown, or an adaptive rule has no ``initial`` threshold.
+        """
         if kind not in KINDS:
             raise ValueError(f"kind must be one of {KINDS}")
         if overshoot not in OVERSHOOT:
@@ -177,6 +253,24 @@ class EventBarBuilder:
         return price * size
 
     def update(self, ts: int, price: float, size: float) -> list[EventBar]:
+        """Fold one trade into the open bar.
+
+        Parameters
+        ----------
+        ts : int
+            Trade time, nanoseconds UTC.
+        price : float
+            Trade price.
+        size : float
+            Trade size. The measure is 1, ``size``, or ``price * size`` depending on ``kind``.
+
+        Returns
+        -------
+        list of EventBar
+            The bars this trade sealed. Usually empty or one. ``split`` can
+            seal several when one trade is larger than the threshold. The
+            still-open bar is not included; read :attr:`open_bar`.
+        """
         ts, price, size = int(ts), float(price), float(size)
         self._roll_day(ts)
         out: list[EventBar] = []
@@ -204,6 +298,27 @@ class EventBarBuilder:
         return out
 
     def update_many(self, ts: Iterable[int], price: Iterable[float], size: Iterable[float]) -> list[EventBar]:
+        """Fold a stream of trades, in order.
+
+        Parameters
+        ----------
+        ts : iterable of int
+            Trade times, nanoseconds UTC.
+        price : iterable of float
+            Trade prices.
+        size : iterable of float
+            Trade sizes. Must be the same length as ``ts`` and ``price``.
+
+        Returns
+        -------
+        list of EventBar
+            Every bar sealed by the stream, in order.
+
+        Raises
+        ------
+        ValueError
+            If the three iterables have different lengths.
+        """
         out: list[EventBar] = []
         for t, p, q in zip(ts, price, size, strict=True):
             out.extend(self.update(t, p, q))
@@ -232,20 +347,63 @@ class EventBars:
     data: dict[str, np.ndarray]
 
     def __len__(self) -> int:
+        """Return the number of sealed bars.
+
+        Returns
+        -------
+        int
+            Length of the ``end`` array.
+        """
         return int(self.data["end"].size)
 
     def __getitem__(self, k: str) -> np.ndarray:
+        """Return one field for every sealed bar.
+
+        Parameters
+        ----------
+        k : str
+            A field name: start, end, open, high, low, close, volume, dollar, n_ticks, threshold.
+
+        Returns
+        -------
+        ndarray
+            That field, one entry per bar.
+        """
         return self.data[k]
 
     @classmethod
     def from_bars(cls, bars: list[EventBar]) -> EventBars:
+        """Stack a list of bars into arrays.
+
+        Parameters
+        ----------
+        bars : list of EventBar
+            Sealed bars, in time order. May be empty.
+
+        Returns
+        -------
+        EventBars
+            One array per field.
+        """
         dt = {"start": np.int64, "end": np.int64, "n_ticks": np.int64}
         return cls(
             {k: np.array([getattr(b, k) for b in bars], dtype=dt.get(k, np.float64)) for k in EVENT_FIELDS}
         )
 
     def panel(self, asset: str = "asset") -> Panel:
-        """A one-asset :class:`Panel` (rows = event bars, labeled by ``end``) for pipelines."""
+        """Return a one-asset panel whose rows are these event bars.
+
+        Parameters
+        ----------
+        asset : str, optional
+            The single asset name. Default is ``"asset"``.
+
+        Returns
+        -------
+        Panel
+            Rows are labeled by bar end. Columns are the OHLCV fields plus
+            ``has_trade``, which is True on every sealed event bar.
+        """
         cols = {
             k: self.data[k].astype(np.float64)[:, None]
             for k in ("open", "high", "low", "close", "volume", "dollar", "n_ticks")
@@ -277,9 +435,26 @@ def build_event_bars(
 def sample_asof(
     series_end: np.ndarray, values: np.ndarray, grid_ends: np.ndarray, missing: float = np.nan
 ) -> np.ndarray:
-    """Value of the last event row with ``end < grid_end`` for each grid bar (strictly before,
-    matching the ``[start, end)`` clock-bar convention: a bar sealed by a trade at ``ts`` is
-    known in the clock bar that contains ``ts``)."""
+    """Return the last event value strictly before each grid-bar end.
+
+    Parameters
+    ----------
+    series_end : ndarray of int64
+        Event-bar ends, nanoseconds UTC, non-decreasing.
+    values : ndarray
+        One value per event bar, aligned with ``series_end``.
+    grid_ends : ndarray of int64
+        Clock-bar ends, nanoseconds UTC.
+    missing : float, optional
+        Value used when no event bar ends before the grid bar. Default is NaN.
+
+    Returns
+    -------
+    ndarray of float64
+        Shape ``(len(grid_ends),)``. The comparison is strict (``end < grid_end``)
+        so a bar sealed by a trade at ``ts`` is visible in the clock bar that
+        contains ``ts``, matching the ``[start, end)`` clock convention.
+    """
     grid_ends = np.asarray(grid_ends, np.int64)
     v = np.asarray(values, dtype=np.float64)
     if v.size == 0:
@@ -312,20 +487,59 @@ class AsofSampler:
     """Incremental as-of sampling: feed sealed event rows, read a clock-grid row at any time."""
 
     def __init__(self, assets: tuple[str, ...], columns: tuple[str, ...]):
+        """Prepare an empty sampler.
+
+        Parameters
+        ----------
+        assets : tuple of str
+            Column order of every row this sampler returns.
+        columns : tuple of str
+            Value names each pushed row may contain.
+        """
         self.assets = tuple(assets)
         self.index = {a: i for i, a in enumerate(self.assets)}
         self.columns = tuple(columns)
         self._rows: list[deque[tuple[int, dict[str, float]]]] = [deque() for _ in self.assets]
 
     def push(self, asset: str, end: int, values: dict[str, float]) -> None:
+        """Record one sealed event bar.
+
+        Parameters
+        ----------
+        asset : str
+            Must be one of the assets passed to the constructor.
+        end : int
+            Bar end, nanoseconds UTC. Must be at least the previous end for this asset.
+        values : dict of str to float
+            Column values. Missing names become NaN when sampled.
+
+        Raises
+        ------
+        ValueError
+            If ``end`` is earlier than the previous bar for this asset.
+        KeyError
+            If ``asset`` was not declared.
+        """
         q = self._rows[self.index[asset]]
         if q and end < q[-1][0]:
             raise ValueError("event rows must arrive in end-time order")
         q.append((int(end), dict(values)))
 
     def row(self, grid_end: int) -> dict[str, np.ndarray]:
-        """Values as of the last sealed event row with ``end < grid_end`` (rows older than the
-        one used are dropped, so call with non-decreasing ``grid_end``)."""
+        """Return values as of the last sealed event bar before ``grid_end``.
+
+        Parameters
+        ----------
+        grid_end : int
+            Clock-bar end, nanoseconds UTC. Call with non-decreasing values:
+            rows older than the one used are dropped.
+
+        Returns
+        -------
+        dict of str to ndarray
+            One ``(N,)`` array per column. The sample is the last event row
+            with ``end < grid_end``. Assets with nothing that old are NaN.
+        """
         out = {k: np.full(len(self.assets), np.nan) for k in self.columns}
         for j, q in enumerate(self._rows):
             while len(q) > 1 and q[1][0] < grid_end:
@@ -350,6 +564,20 @@ class EventPipeline:
         history: EventBars | None = None,
         asset: str = "asset",
     ):
+        """Warm a one-asset live engine from sealed event bars.
+
+        Parameters
+        ----------
+        pipeline : Pipeline or Graph
+            Factors to run. Inputs are the usual bar fields.
+        builder : EventBarBuilder
+            The bar state machine. If it already holds an open bar, that bar
+            is the pipeline's open row immediately.
+        history : EventBars or None, optional
+            Sealed bars to warm from. ``None`` starts empty, so windows stay missing until enough bars seal.
+        asset : str, optional
+            Name of the single asset. Default is ``"asset"``.
+        """
         self.builder = builder
         hist = history.panel(asset) if history is not None else EventBars.from_bars([]).panel(asset)
         self.engine = LiveEngine(pipeline, hist)

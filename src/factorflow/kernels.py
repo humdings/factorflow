@@ -24,12 +24,32 @@ F64 = np.float64
 
 
 def _views(x: np.ndarray, w: int) -> list[np.ndarray]:
-    """The W lagged views x[k : k + T_out] for k = 0..W-1 (oldest first)."""
+    """Lagged windows of ``x``, oldest first.
+
+    ``views[k]`` is ``x[k : k + T_out]``. Adding those views left to right is the
+    same sequence of additions a live call makes on one window of length ``w``,
+    which is why a sealed row matches batch.
+    """
     t_out = x.shape[0] - w + 1
     return [x[k : k + t_out] for k in range(w)]
 
 
 def wsum(x: np.ndarray, w: int) -> np.ndarray:
+    """Return the rolling sum over ``w`` rows.
+
+    Parameters
+    ----------
+    x : ndarray of shape (T, N)
+        Input values. ``T`` is the number of rows (bars) and ``N`` the number of assets.
+    w : int
+        Window length in bars. Must be at least 1, and at most ``T``.
+
+    Returns
+    -------
+    ndarray of shape (T - w + 1, N)
+        Sum of each window. A window that contains a NaN is NaN, because NaN poisons
+        the sum. The sum is accumulated oldest to newest, one addition at a time.
+    """
     v = _views(x, w)
     acc = v[0].astype(F64, copy=True)
     for k in range(1, w):
@@ -38,10 +58,47 @@ def wsum(x: np.ndarray, w: int) -> np.ndarray:
 
 
 def wmean(x: np.ndarray, w: int) -> np.ndarray:
+    """Return the rolling mean over ``w`` rows.
+
+    Parameters
+    ----------
+    x : ndarray of shape (T, N)
+        Input values.
+    w : int
+        Window length in bars.
+
+    Returns
+    -------
+    ndarray of shape (T - w + 1, N)
+        ``wsum(x, w) / w``. A window that contains a NaN is NaN.
+    """
     return wsum(x, w) / w
 
 
 def wvar(x: np.ndarray, w: int, ddof: int = 1) -> np.ndarray:
+    """Return the rolling variance over ``w`` rows.
+
+    Parameters
+    ----------
+    x : ndarray of shape (T, N)
+        Input values.
+    w : int
+        Window length in bars. Needs ``w > ddof``.
+    ddof : int, optional
+        Delta degrees of freedom. The divisor is ``w - ddof``. Default is 1
+        (the sample variance).
+
+    Returns
+    -------
+    ndarray of shape (T - w + 1, N)
+        Variance of each window. NaN if the window contains a NaN or the divisor
+        is not positive.
+
+    Notes
+    -----
+    The mean is the rolling sum divided by ``w``, and the squared deviations are
+    summed oldest to newest. That order matches a live call on the same window.
+    """
     v = _views(x, w)
     with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
         m = wsum(x, w) / w
@@ -54,10 +111,41 @@ def wvar(x: np.ndarray, w: int, ddof: int = 1) -> np.ndarray:
 
 
 def wstd(x: np.ndarray, w: int, ddof: int = 1) -> np.ndarray:
+    """Return the rolling standard deviation over ``w`` rows.
+
+    Parameters
+    ----------
+    x : ndarray of shape (T, N)
+        Input values.
+    w : int
+        Window length in bars.
+    ddof : int, optional
+        Passed to :func:`wvar`. Default is 1.
+
+    Returns
+    -------
+    ndarray of shape (T - w + 1, N)
+        Square root of the rolling variance.
+    """
     return np.sqrt(wvar(x, w, ddof))
 
 
 def wmin(x: np.ndarray, w: int) -> np.ndarray:
+    """Return the rolling minimum over ``w`` rows.
+
+    Parameters
+    ----------
+    x : ndarray of shape (T, N)
+        Input values.
+    w : int
+        Window length in bars.
+
+    Returns
+    -------
+    ndarray of shape (T - w + 1, N)
+        Minimum of each window. NaN if the window contains a NaN (``np.minimum``
+        propagates it).
+    """
     v = _views(x, w)
     acc = v[0].astype(F64, copy=True)
     for k in range(1, w):
@@ -66,6 +154,20 @@ def wmin(x: np.ndarray, w: int) -> np.ndarray:
 
 
 def wmax(x: np.ndarray, w: int) -> np.ndarray:
+    """Return the rolling maximum over ``w`` rows.
+
+    Parameters
+    ----------
+    x : ndarray of shape (T, N)
+        Input values.
+    w : int
+        Window length in bars.
+
+    Returns
+    -------
+    ndarray of shape (T - w + 1, N)
+        Maximum of each window. NaN if the window contains a NaN.
+    """
     v = _views(x, w)
     acc = v[0].astype(F64, copy=True)
     for k in range(1, w):
@@ -74,7 +176,22 @@ def wmax(x: np.ndarray, w: int) -> np.ndarray:
 
 
 def wtsrank(x: np.ndarray, w: int) -> np.ndarray:
-    """Fraction of the window <= the newest value (1/W .. 1). NaN if any NaN in the window."""
+    """Time-series rank of the newest value inside each window.
+
+    Parameters
+    ----------
+    x : ndarray of shape (T, N)
+        Input values.
+    w : int
+        Window length in bars.
+
+    Returns
+    -------
+    ndarray of shape (T - w + 1, N)
+        Fraction of the window that is less than or equal to the newest value,
+        in ``(1/w, ..., 1)``. NaN if the window contains a NaN. Ties with the
+        newest value count as less than or equal, so a constant window ranks 1.
+    """
     v = _views(x, w)
     last = v[-1]
     cnt = np.zeros(last.shape, dtype=F64)
@@ -88,6 +205,23 @@ def wtsrank(x: np.ndarray, w: int) -> np.ndarray:
 
 
 def wcov(a: np.ndarray, b: np.ndarray, w: int, ddof: int = 1) -> np.ndarray:
+    """Return the rolling covariance of two series.
+
+    Parameters
+    ----------
+    a, b : ndarray of shape (T, N)
+        Paired inputs. Compared elementwise; column ``j`` of ``a`` is paired
+        with column ``j`` of ``b``.
+    w : int
+        Window length in bars.
+    ddof : int, optional
+        Delta degrees of freedom. Default is 1.
+
+    Returns
+    -------
+    ndarray of shape (T - w + 1, N)
+        Covariance of each window. NaN if either window contains a NaN.
+    """
     va, vb = _views(a, w), _views(b, w)
     with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
         ma, mb = wsum(a, w) / w, wsum(b, w) / w
@@ -98,22 +232,79 @@ def wcov(a: np.ndarray, b: np.ndarray, w: int, ddof: int = 1) -> np.ndarray:
 
 
 def wcorr(a: np.ndarray, b: np.ndarray, w: int) -> np.ndarray:
+    """Return the rolling Pearson correlation of two series.
+
+    Parameters
+    ----------
+    a, b : ndarray of shape (T, N)
+        Paired inputs, column by column.
+    w : int
+        Window length in bars. A constant window has a zero standard deviation,
+        and the correlation is NaN there.
+
+    Returns
+    -------
+    ndarray of shape (T - w + 1, N)
+        ``wcov(a, b, w) / (wstd(a, w) * wstd(b, w))`` with ``ddof`` 1.
+    """
     c = wcov(a, b, w)
     with np.errstate(invalid="ignore", divide="ignore"):
         return c / (wstd(a, w) * wstd(b, w))
 
 
 def wshift(x: np.ndarray, w: int) -> np.ndarray:
-    """Value W-1 rows back (shift by W-1)."""
+    """Value from ``w - 1`` rows earlier.
+
+    Parameters
+    ----------
+    x : ndarray of shape (T, N)
+        Input values.
+    w : int
+        One more than the lag. A lag of ``n`` bars is ``w = n + 1``, so the
+        output lines up with the other windowed kernels (``T - w + 1`` rows).
+
+    Returns
+    -------
+    ndarray of shape (T - w + 1, N)
+        ``x`` truncated to the rows that have a full lag. This is a copy.
+    """
     return x[: x.shape[0] - w + 1].copy()
 
 
 def ewm_alpha(halflife: float) -> float:
+    """Smoothing weight for an exponentially weighted mean.
+
+    Parameters
+    ----------
+    halflife : float
+        Half-life in bars. Must be positive. A half-life of 1 means the previous
+        value is halved each bar.
+
+    Returns
+    -------
+    float
+        ``1 - exp(-ln(2) / halflife)``, in ``(0, 1)``.
+    """
     return 1.0 - math.exp(-math.log(2.0) / halflife)
 
 
 def ewm_step(x: np.ndarray, prev: np.ndarray, alpha: float) -> np.ndarray:
-    """One EWMA step. NaN input carries the previous value; NaN previous starts at x."""
+    """Advance an exponentially weighted mean by one row.
+
+    Parameters
+    ----------
+    x : ndarray of shape (N,)
+        The new observation. A NaN keeps ``prev`` (the mean does not jump to missing).
+    prev : ndarray of shape (N,)
+        The previous mean. A NaN starts the mean at ``x``.
+    alpha : float
+        Weight on ``x``, from :func:`ewm_alpha`. The previous mean keeps ``1 - alpha``.
+
+    Returns
+    -------
+    ndarray of shape (N,)
+        The updated mean.
+    """
     upd = alpha * x + (1.0 - alpha) * prev
     out = np.where(np.isnan(prev), x, upd)
     return np.where(np.isnan(x), prev, out)
@@ -135,7 +326,26 @@ def _valid_groups(v: np.ndarray, mask: np.ndarray | None, groups: np.ndarray | N
 def cs_rank(
     v: np.ndarray, mask: np.ndarray | None, groups: np.ndarray | None, ascending: bool = True
 ) -> np.ndarray:
-    """Ordinal rank 1..k within each group among valid entries (ties by asset order)."""
+    """Ordinal rank within each group.
+
+    Parameters
+    ----------
+    v : ndarray of shape (N,)
+        One cross-section of values.
+    mask : ndarray of bool, shape (N,), or None
+        Positions that take part. ``None`` keeps every finite value.
+    groups : ndarray of int, shape (N,), or None
+        Group codes. ``None`` is one group. Codes below 0 are missing and are
+        not ranked.
+    ascending : bool, optional
+        ``True`` gives rank 1 to the smallest value. Default is ``True``.
+
+    Returns
+    -------
+    ndarray of shape (N,)
+        Ranks ``1 .. k`` inside each group, as float. Ties keep asset order
+        (the earlier column wins the lower rank). Invalid entries are NaN.
+    """
     out = np.full(v.shape[0], np.nan)
     valid, g = _valid_groups(v, mask, groups)
     idx = np.flatnonzero(valid)
@@ -143,7 +353,7 @@ def cs_rank(
         return out
     vals = v[idx] if ascending else -v[idx]
     gi = g[idx]
-    order = np.lexsort((idx, vals, gi))  # group, then value, then asset index
+    order = np.lexsort((idx, vals, gi))  # group, then value, then column index (stable ties)
     sg = gi[order]
     pos = np.arange(order.size)
     starts = np.r_[0, np.flatnonzero(sg[1:] != sg[:-1]) + 1]
@@ -164,6 +374,23 @@ def _group_moments(v: np.ndarray, valid: np.ndarray, g: np.ndarray):
 
 
 def cs_demean(v: np.ndarray, mask: np.ndarray | None, groups: np.ndarray | None) -> np.ndarray:
+    """Subtract the group mean.
+
+    Parameters
+    ----------
+    v : ndarray of shape (N,)
+        One cross-section.
+    mask : ndarray of bool, shape (N,), or None
+        Positions that enter the mean and receive a result.
+    groups : ndarray of int, shape (N,), or None
+        Group codes. ``None`` is one group. Codes below 0 are missing.
+
+    Returns
+    -------
+    ndarray of shape (N,)
+        ``v`` minus its group's mean. Invalid entries are NaN. A group of one
+        is demeaned to 0.
+    """
     out = np.full(v.shape[0], np.nan)
     valid, g = _valid_groups(v, mask, groups)
     if not valid.any():
@@ -174,6 +401,24 @@ def cs_demean(v: np.ndarray, mask: np.ndarray | None, groups: np.ndarray | None)
 
 
 def cs_zscore(v: np.ndarray, mask: np.ndarray | None, groups: np.ndarray | None) -> np.ndarray:
+    """Standardize by the group mean and sample standard deviation.
+
+    Parameters
+    ----------
+    v : ndarray of shape (N,)
+        One cross-section.
+    mask : ndarray of bool, shape (N,), or None
+        Positions that enter the moments and receive a result.
+    groups : ndarray of int, shape (N,), or None
+        Group codes. ``None`` is one group. Codes below 0 are missing.
+
+    Returns
+    -------
+    ndarray of shape (N,)
+        ``(v - mean) / std`` with the sample standard deviation (divisor
+        ``count - 1``). A group with fewer than two valid values, or with zero
+        dispersion, is NaN.
+    """
     out = np.full(v.shape[0], np.nan)
     valid, g = _valid_groups(v, mask, groups)
     if not valid.any():

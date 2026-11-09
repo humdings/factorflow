@@ -140,6 +140,18 @@ def _live_view(mkt, speed: float, seconds: float, top: int, out=sys.stdout) -> N
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run ``demo``, ``validate``, or ``bench`` from the command line.
+
+    Parameters
+    ----------
+    argv : list of str or None, optional
+        Arguments after the program name. ``None`` reads ``sys.argv``.
+
+    Returns
+    -------
+    int
+        0 when the live replay matched batch, 1 otherwise. ``bench`` returns 0.
+    """
     ap = argparse.ArgumentParser(prog="python -m factorflow.sim", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in ("demo", "validate", "bench"):

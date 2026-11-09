@@ -60,12 +60,33 @@ def _tstat(x: np.ndarray) -> float:
 
 
 def run_daily(sim: AssetSim) -> BatchResult:
+    """Run the daily research pipeline on one simulated book.
+
+    Parameters
+    ----------
+    sim : AssetSim
+        A book from :func:`simulate`.
+
+    Returns
+    -------
+    BatchResult
+        Outputs of :func:`factorflow.sim.pipelines.daily_pipeline`.
+    """
     return BatchEngine().run(daily_pipeline(len(sim.assets), beta_window_for(sim.n_hist)), sim.daily)
 
 
 # ====================================================================== factor recovery
 @dataclass
 class FactorRecovery:
+    """How closely the engine's daily returns and betas match the planted factors.
+
+    Notes
+    -----
+    ``factors`` maps a factor name to correlation, slope, bias in basis points,
+    and volatility of the error. ``beta`` compares the engine's last rolling beta
+    with the true beta. ``residuals`` is ``(T, N)``.
+    """
+
     factors: dict[str, dict[str, float]]  # name -> corr / slope / bias / rmse_rel
     beta: dict[str, float]  # engine rolling beta vs true beta
     residuals: np.ndarray  # (T, N) regression residuals (NaN where not estimated)
@@ -82,6 +103,23 @@ def _design(sim: AssetSim) -> tuple[np.ndarray, list[str]]:
 
 
 def factor_recovery(sim: AssetSim, res: BatchResult | None = None, skip: int = 1) -> FactorRecovery:
+    """Regress each day's engine log returns on the true exposures.
+
+    Parameters
+    ----------
+    sim : AssetSim
+        The book. Uses equities in :func:`validate`.
+    res : BatchResult or None, optional
+        A previous :func:`run_daily`. Computed if omitted.
+    skip : int, optional
+        Leading days dropped before the fit summary. Default is 1, so the
+        first return, which has no lag, is skipped.
+
+    Returns
+    -------
+    FactorRecovery
+        Per-factor fit statistics and the residual panel.
+    """
     res = res or run_daily(sim)
     R = res.values["logret"]
     X, names = _design(sim)
@@ -126,6 +164,16 @@ def factor_recovery(sim: AssetSim, res: BatchResult | None = None, skip: int = 1
 # ====================================================================== IC
 @dataclass
 class ICResult:
+    """Information coefficients of the planted signal.
+
+    Notes
+    -----
+    ``resid_ic`` is the mean correlation of yesterday's signal with today's
+    risk-adjusted residual, which is what the generator plants. ``raw_ic`` uses
+    total next-day returns. ``rank_ic`` rank-correlates the signal with total returns.
+    ``resid_ic_se`` is the standard error of the daily residual IC.
+    """
+
     planted: float
     resid_ic: float  # mean risk-adjusted residual IC (what the generator plants)
     resid_ic_se: float
@@ -135,10 +183,33 @@ class ICResult:
 
     @property
     def z(self) -> float:
+        """Return how many standard errors the residual IC sits from the planted value.
+
+        Returns
+        -------
+        float
+            ``(resid_ic - planted) / resid_ic_se``.
+        """
         return (self.resid_ic - self.planted) / self.resid_ic_se
 
 
 def signal_ic(sim: AssetSim, res: BatchResult | None = None, rec: FactorRecovery | None = None) -> ICResult:
+    """Measure the planted signal's information coefficient on engine outputs.
+
+    Parameters
+    ----------
+    sim : AssetSim
+        The book.
+    res : BatchResult or None, optional
+        Daily pipeline result. Computed if omitted.
+    rec : FactorRecovery or None, optional
+        Residuals. Computed if omitted.
+
+    Returns
+    -------
+    ICResult
+        Residual, raw, and rank IC.
+    """
     res = res or run_daily(sim)
     rec = rec or factor_recovery(sim, res)
     s = res.values["signal_z"]
@@ -165,6 +236,16 @@ def signal_ic(sim: AssetSim, res: BatchResult | None = None, rec: FactorRecovery
 # ====================================================================== backtest
 @dataclass
 class Backtest:
+    """A decile long-short of the planted signal.
+
+    Notes
+    -----
+    Returns are in basis points per day except ``sharpe`` (annualized, 252 days)
+    and ``tstat`` (mean over standard error). ``expected_bp`` is the mean the
+    planted kappa implies for a normal signal's top and bottom deciles.
+    ``daily`` is the long-short return series, not in basis points.
+    """
+
     days: int
     mean_bp: float  # mean daily long-short return
     vol_bp: float
@@ -210,8 +291,11 @@ def decile_backtest(sim: AssetSim, res: BatchResult | None = None) -> Backtest:
 
 # ====================================================================== bar distributions
 def _session_returns(close: np.ndarray, end: np.ndarray, day_of) -> np.ndarray:
-    """Log close-to-close returns between consecutive bars that close in the same session
-    (so no return spans the overnight gap)."""
+    """Return log returns between consecutive bars in the same session.
+
+    Overnight gaps are excluded: a return is kept only when both bars close
+    on the same session day.
+    """
     if close.size < 2:
         return np.empty(0)
     r = np.diff(np.log(close))
@@ -287,6 +371,8 @@ def bar_distributions(
 # ====================================================================== everything
 @dataclass
 class Validation:
+    """Factor recovery, signal IC, the decile backtest, and bar-shape statistics."""
+
     recovery: FactorRecovery
     ic: ICResult
     backtest: Backtest
@@ -294,6 +380,13 @@ class Validation:
     crypto_bars: dict[str, dict[str, float]] | None
 
     def report(self) -> str:
+        """Format the validation as a text report.
+
+        Returns
+        -------
+        str
+            One block for factors, one for the signal, and one per asset class for bar distributions.
+        """
         L = ["Factor recovery (daily cross-sectional OLS on true exposures):"]
         L.append(
             f"  {'factor':<9} {'corr':>6} {'slope':>6} {'bias bp':>8} {'true vol bp':>11} {'err vol bp':>10}"
@@ -347,6 +440,18 @@ class Validation:
 
 
 def validate(mkt: SimMarket) -> Validation:
+    """Run every check on a simulated market.
+
+    Parameters
+    ----------
+    mkt : SimMarket
+        From :func:`factorflow.sim.market.simulate`.
+
+    Returns
+    -------
+    Validation
+        Equity results, plus 24/7 bar distributions when the market has a crypto book.
+    """
     eq = mkt.equities
     res = run_daily(eq)
     rec = factor_recovery(eq, res)

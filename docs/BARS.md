@@ -3,7 +3,7 @@
 factorflow computes on **rows**. A row is a bar; the newest row may be *open* (provisional,
 revised by ticks) and every other row is *sealed* (immutable). What decides when a bar closes
 (the **close trigger**) is separate from the engine. The engine only sees `revise()` and
-`seal()`. Two families of triggers ship in M0:
+`seal()`. Two families of triggers are included:
 
 | trigger | bars are | who drives `seal()` | module |
 |---|---|---|---|
@@ -23,8 +23,8 @@ different measure plus an expected-value threshold.
 * **Grace.** A bar seals once a tick or `advance(now)` sees `now >= end + grace`. The default is
   2 s for intraday bars and 0 for daily bars. During the grace period, late prints for the
   bar are still accepted. Trades stamped `>= end` are held and applied to the next bar after
-  the seal. Prints for an already-sealed bar are dropped and counted in `late_ticks`. A
-  corrections path is planned for M1.
+  the seal. Prints for an already-sealed bar are dropped and counted in `late_ticks`.
+  There is no corrections path for those late prints yet.
 * **Missing bars** carry the close forward: `open = high = low = close = previous close`,
   `volume = dollar = n_ticks = 0`, `has_trade = False` (NaN before an asset's first trade).
   `advance()` seals any number of empty bars.
@@ -99,8 +99,8 @@ from different times, so factorflow separates the two jobs:
 ## Performance notes
 
 * Event-bar construction is a per-trade Python state machine, roughly 1-2 µs per trade, so
-  about a second per million trades. That is fine for crypto at BTC/ETH/SOL rates. A
-  vectorized fixed-threshold fast path (cumsum + searchsorted) is an M1 option, but it must
-  then be tested equal to the state machine.
+  about a second per million trades. A vectorized fixed-threshold fast path (cumsum plus
+  searchsorted) is a possible later optimization, and it would have to match this state
+  machine exactly.
 * Clock bars: `build_time_bars` uses the same per-trade loop; history is normally loaded as
   bars (`Panel.from_frame`), not rebuilt from trades.

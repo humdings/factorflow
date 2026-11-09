@@ -19,6 +19,14 @@ from factorflow.sim.replay import Extras, ReplayStats, replay
 
 @dataclass
 class BenchRow:
+    """One benchmark measurement.
+
+    Notes
+    -----
+    ``names`` is the equity count. ``nodes`` is the compiled graph size.
+    ``stats`` comes from :meth:`ReplayStats.summary`.
+    """
+
     names: int
     pipeline: str
     nodes: int
@@ -32,12 +40,15 @@ def run_bench(
     seed: int = 7,
     pipelines: tuple[str, ...] = ("demo", "wide100"),
 ) -> list[BenchRow]:
-    """For each universe size: replay the first ``minutes`` of a session (the busiest part of
-    the U-shape) through a minute-grid LiveEngine warmed on the previous session.
+    """Replay the first ``minutes`` of a session for each universe size.
 
-    Modes: ``ingest`` (ticks + seals, no revisions), ``revise@1s`` (a revision every second of
-    market time, like a dashboard), ``revise@tick`` (a revision after every trade, first
-    5 minutes only).
+    The window is the busiest part of the intraday U-shape. The engine is a
+    minute-grid :class:`~factorflow.live.LiveEngine` warmed on the previous
+    session.
+
+    Modes are ``ingest`` (ticks and seals, no revisions), ``revise@1s`` (a
+    revision every second of market time), and ``revise@tick`` (a revision
+    after every trade, first 5 minutes only).
     """
     rows: list[BenchRow] = []
     grid = BarGrid("XNYS", "1min")
@@ -68,6 +79,20 @@ def run_bench(
 
 
 def format_bench(rows: list[BenchRow], minutes: int) -> str:
+    """Format benchmark rows as a text table.
+
+    Parameters
+    ----------
+    rows : list of BenchRow
+        Measurements from :func:`run_bench`.
+    minutes : int
+        How many minutes of the session were replayed, except the per-tick mode, which uses 5.
+
+    Returns
+    -------
+    str
+        A header plus one line per row. Latencies are milliseconds.
+    """
     L = [
         f"factorflow replay benchmark: XNYS 1-minute grid, first {minutes} min of a session "
         f"(revise@tick: first 5 min)",
@@ -88,6 +113,17 @@ def format_bench(rows: list[BenchRow], minutes: int) -> str:
 
 
 def main(names: tuple[int, ...], minutes: int, seed: int) -> None:
+    """Run the benchmark and print the table.
+
+    Parameters
+    ----------
+    names : tuple of int
+        Equity universe sizes.
+    minutes : int
+        Minutes of the session to replay.
+    seed : int
+        SimConfig seed.
+    """
     t0 = time.perf_counter()
     rows = run_bench(names, minutes, seed)
     print(format_bench(rows, minutes))
