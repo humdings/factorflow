@@ -1,5 +1,6 @@
 site_name: factorflow
 site_description: Pipeline-style factor engine with batch and live execution
+site_url: https://humdings.github.io/factorflow/
 repo_url: https://github.com/humdings/factorflow
 docs_dir: docs
 

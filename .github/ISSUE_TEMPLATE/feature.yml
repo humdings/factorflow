@@ -1,0 +1,19 @@
+name: Feature
+description: A change to the public library
+title: "Feature: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What you cannot do with the library today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: The API you have in mind, and how batch and live would stay in agreement.
+    validations:
+      required: true

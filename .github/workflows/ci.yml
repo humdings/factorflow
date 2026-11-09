@@ -5,19 +5,39 @@ on:
   pull_request:
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        python: ["3.11", "3.13"]
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python }}
+      - run: uv sync --locked
+      - run: uv run pytest
+      - run: uv run python examples/quickstart.py
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
       - run: uv sync --locked --group docs
       - run: uv run ruff check . && uv run ruff format --check .
       - run: uv run pyright
       - run: uv run interrogate src/factorflow
-      - run: uv run pytest
-      - run: uv run python examples/quickstart.py
       - run: uv run mkdocs build --strict
+
+  nix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - run: nix flake check

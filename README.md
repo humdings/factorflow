@@ -1,5 +1,10 @@
 # factorflow
 
+[![CI](https://github.com/humdings/factorflow/actions/workflows/ci.yml/badge.svg)](https://github.com/humdings/factorflow/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/factorflow)](https://pypi.org/project/factorflow/)
+[![Docs](https://img.shields.io/badge/docs-github%20pages-blue)](https://humdings.github.io/factorflow/)
+
 factorflow evaluates factor, filter, and classifier expressions on bars. The same pipeline
 runs two ways, and the two ways agree:
 
@@ -10,7 +15,11 @@ Every live value carries an open/sealed flag (`Snapshot.is_open`, and an `is_ope
 
 Bars are either clock-time (one grid for every asset) or information-driven (tick, volume, or dollar bars, per asset). The library does not load data and does not talk to a broker. You pass a `Panel` or a trade stream.
 
-The expression style — `Factor`, `Filter`, `Classifier`, `rank`, `zscore`, masks — follows the shape of [Zipline's Pipeline](https://github.com/quantopian/zipline) API. This repository is an independent implementation. No Zipline source is included.
+Inspired by [Zipline's Pipeline](https://github.com/quantopian/zipline) API. This is an independent implementation.
+
+![10-bar return on the quickstart's synthetic minute bars. The shaded minute is the open bar; the right panel is that bar revising as the last print moves.](docs/img/quickstart-return.png)
+
+API reference: <https://humdings.github.io/factorflow/> (published from `main` once GitHub Pages is enabled). The PyPI badge starts working when the package is published. Until then, install from a checkout or from git.
 
 ## Install
 
@@ -51,7 +60,7 @@ inputs.factorflow.url = "github:humdings/factorflow";
 nixpkgs.overlays = [ inputs.factorflow.overlays.default ];
 ```
 
-The package is not on PyPI yet. Install from a checkout or from git:
+The package version in this tree is 0.1.0. It is not on PyPI yet. Install from a checkout or from git:
 
 ```bash
 pip install "factorflow @ git+https://github.com/humdings/factorflow.git"
@@ -257,7 +266,9 @@ A clock grid is a calendar times a frequency:
 Information-driven bars close when a measure reaches a threshold. The measure is `1` (tick), `size` (volume), or `price * size` (dollar).
 
 ```python
-ff.build_event_bars(ts, price, size, "dollar", ff.AdaptiveDaily(bars_per_day=50, lookback_days=20, initial=1_000_000))
+ff.build_event_bars(
+    ts, price, size, "dollar", ff.AdaptiveDaily(bars_per_day=50, lookback_days=20, initial=1_000_000)
+)
 ```
 
 `Fixed(value)` holds the threshold constant. `AdaptiveDaily` sets each day's threshold from the mean daily measure over the previous `lookback_days` completed days, divided by `bars_per_day`. Days with no trades are skipped, and the threshold does not use the current day's volume. Until enough days exist, `initial` is the threshold.
@@ -296,7 +307,8 @@ python -m nbconvert --execute --to notebook --inplace examples/demo.ipynb
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). The short version:
+See [CONTRIBUTING.md](CONTRIBUTING.md) and the [code of conduct](CODE_OF_CONDUCT.md).
+Security reports go through [private vulnerability reporting](https://github.com/humdings/factorflow/security/advisories/new). See [SECURITY.md](SECURITY.md).
 
 ```bash
 pytest
@@ -304,7 +316,7 @@ ruff check .
 pyright
 ```
 
-The API reference is generated from the docstrings:
+The API reference is generated from the docstrings and published to <https://humdings.github.io/factorflow/> after GitHub Pages is enabled.
 
 ```bash
 pip install -e ".[docs]"

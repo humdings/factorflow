@@ -4,6 +4,8 @@ factorflow evaluates factor, filter, and classifier expressions on bars. The sam
 pipeline runs as a batch over a history and incrementally on the still-open bar,
 and the sealed rows agree.
 
+![10-bar return on synthetic minute bars, including the open bar revising.](img/quickstart-return.png)
+
 Install and a worked example are in the repository [README](https://github.com/humdings/factorflow/blob/main/README.md).
 This site is the API reference generated from the NumPy-style docstrings.
 
