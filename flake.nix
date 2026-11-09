@@ -52,6 +52,11 @@
           build-system = [ ps.hatchling ];
           dependencies = [ ps.numpy ps.polars ps.pandas (calendarDeps ps) ];
           nativeCheckInputs = [ ps.pytestCheckHook ps.hypothesis (interrogate ps) ];
+          # pytest ships py.py, which hides pylib if that store path comes first.
+          # interrogate does `from py import io` and needs the real package.
+          preCheck = ''
+            export PYTHONPATH="${ps.py}/${ps.python.sitePackages}''${PYTHONPATH:+:}$PYTHONPATH"
+          '';
           # Tests marked slow (long simulations) run in CI / `uv run pytest`, not in the build.
           disabledTestMarks = [ "slow" ];
           pythonImportsCheck = [ "factorflow" ];
