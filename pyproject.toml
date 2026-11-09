@@ -1,6 +1,6 @@
 [project]
 name = "factorflow"
-version = "0.0.1"
+version = "0.1.0"
 description = "Pipeline-style factor engine on a bar grid with batch and incremental (open-bar) execution"
 readme = "README.md"
 license = "Apache-2.0"
@@ -14,16 +14,20 @@ dependencies = [
     "pandas>=2.0",
 ]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Financial and Insurance Industry",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Typing :: Typed",
 ]
 
 [project.urls]
 Repository = "https://github.com/humdings/factorflow"
 Changelog = "https://github.com/humdings/factorflow/blob/main/CHANGELOG.md"
+Documentation = "https://humdings.github.io/factorflow/"
 
 [project.optional-dependencies]
 dev = [

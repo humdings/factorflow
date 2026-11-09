@@ -1,0 +1,33 @@
+name: Bug
+description: Something in factorflow does the wrong thing
+title: "Bug: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, and what you got.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      placeholder: "0.1.0, or the commit SHA"
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python
+      placeholder: "3.12, and Nix or pip"
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Small example
+      description: Synthetic data is enough. Do not paste private market data.
+    validations:
+      required: true

@@ -1,0 +1,12 @@
+# Python dependencies are locked with uv (pyproject.toml + uv.lock).
+# The uv ecosystem is what keeps `uv sync --locked` and the Nix shell valid.
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

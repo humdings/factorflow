@@ -24,7 +24,7 @@ from factorflow.live import LiveEngine, Snapshot
 from factorflow.panel import Panel
 from factorflow.terms import BarData, Classifier, Column, Factor, Filter, Term, where
 
-__version__ = "0.0.1"
+__version__ = "0.1.0"
 
 __all__ = [
     "AdaptiveDaily",

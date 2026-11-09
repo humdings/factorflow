@@ -36,7 +36,7 @@
       mkFactorflow = ps:
         ps.buildPythonPackage {
           pname = "factorflow";
-          version = "0.0.1";
+          version = "0.1.0";
           pyproject = true;
           src = self;
           build-system = [ ps.hatchling ];
