@@ -92,7 +92,8 @@ from different times, so factorflow separates the two jobs:
    bar**. `sample_panel(per_asset, grid_ends)` (batch) and `AsofSampler` (live) take, for each
    clock bar, the last event row with `end < grid_end`. The comparison is strict because a bar
    sealed by a trade at `ts` belongs to the clock bar containing `ts`. The result is an
-   ordinary clock-grid `Panel`, so `rank`, `zscore` and `demean` (with `groupby` and masks) apply
+   ordinary clock-grid `Panel`, so `rank`, `zscore`, `demean`, and the other cross-sectional
+   reductions (`median`, `mean`, `quantile`, and the rest, with `groupby` and masks) apply
    unchanged. Open event bars are never sampled, so cross-sectional values move only when an
    event bar seals.
 
