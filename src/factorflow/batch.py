@@ -84,19 +84,31 @@ def compute_node(
 
     Notes
     -----
-    Row-wise terms (cross-section, EWMA) loop one row at a time, which is the
-    same loop the live engine runs for a single open row. Windowed terms are
-    padded by ``window - 1`` missing rows and then handed to ``compute``.
+    Row-wise terms (cross-section, EWMA, cumulative) loop one row at a time,
+    which is the same loop the live engine runs for a single open row. A
+    recursive term may return ``(row, state)`` when the next step needs more
+    than the output; that state is what the next row and the live engine see
+    as ``prev``. Windowed terms are padded by ``window - 1`` missing rows and
+    then handed to ``compute``.
     """
     n_rows = blocks[0].shape[0]
     if t.rowwise:
         out = np.empty(blocks[0].shape, dtype=t.dtype)
         p = prev
         for r in range(n_rows):
-            row = t.compute_row([b[r : r + 1] for b in blocks], p)
+            produced = t.compute_row([b[r : r + 1] for b in blocks], p)
+            if isinstance(produced, tuple):
+                row, p = produced
+            else:
+                row = produced
+                p = row if t.recursive else None
             out[r] = row
-            p = row if t.recursive else None
-        return out, (out[-1].copy() if (t.recursive and n_rows) else prev)
+        # ``p`` is the recursive state. For an EWMA it is the output row. For
+        # a term that returns ``(row, state)`` it is the state, which can have
+        # a different shape from the output.
+        if t.recursive and n_rows and p is not None:
+            return out, np.array(p, copy=True)
+        return out, prev
     w = t.window
     padded = [_pad(b, w - 1, inp.missing) for b, inp in zip(blocks, t.inputs, strict=True)]
     return np.asarray(t.compute(padded), dtype=t.dtype), None

@@ -219,11 +219,13 @@ A `Panel` is a dense time-by-asset block. `times` are bar-end timestamps in nano
 
 `Column("close")` reads a float column. `Column("sector", Classifier)` reads integer group codes (`-1` is missing). `BarData` is the columns a bar builder fills: `open`, `high`, `low`, `close`, `volume`, `dollar`, `n_ticks`, and the filter `has_trade`.
 
-Factors support arithmetic and comparisons. Comparisons produce filters. Useful built-ins include `shift`, `delta`, `pct_change`, `rolling_sum`, `rolling_mean`, `rolling_std`, `rolling_min`, `rolling_max`, `ts_rank`, `rolling_cov`, `rolling_corr`, `rolling_beta`, `ewm_mean`, `rank`, `zscore`, `demean`, `top`, and `bottom`. `rank`, `zscore`, and `demean` take `mask=` and `groupby=`. `where(condition, a, b)` is the conditional.
+Factors support arithmetic and comparisons. Comparisons produce filters. Useful built-ins include `log`, `exp`, `sqrt`, `shift`, `delta`, `pct_change`, `rolling_sum`, `rolling_mean`, `rolling_std`, `rolling_var`, `rolling_min`, `rolling_max`, `rolling_median`, `rolling_quantile`, `rolling_skew`, `rolling_kurtosis`, `rolling_mad`, `rolling_count`, `rolling_product`, `ts_rank`, `rolling_cov`, `rolling_corr`, `rolling_beta`, `ewm_mean`, `ewm_std`, `cumsum`, `cumprod`, `cummin`, `cummax`, `rank`, `zscore`, and `demean`. `where(condition, a, b)` is the conditional.
+
+`rank`, `zscore`, `demean`, `top`, and `bottom` are cross-sectional and take `mask=` and `groupby=`. So do `mean`, `sum`, `median`, `std`, `var`, `min`, `max`, `quantile`, `skew`, `kurtosis`, `mad`, `count`, and `product`, which broadcast the group statistic onto every asset that entered it. `quantile` takes a fraction in `[0, 1]` (a percentile is that fraction times 100). A trailing window is the `rolling_*` method of the same name.
+
+Windows that contain a missing value yield a missing value. That matches the usual Pipeline rule. `ewm_mean`, `ewm_std`, and the cumulative methods keep the previous value when the new observation is missing, and start at the first finite observation. `ewm_std` is missing until two finite observations have been seen.
 
 A `Pipeline` names the outputs and may set a `screen` filter. `BatchEngine().run(pipeline, panel)` returns a `BatchResult`. `result.frame()` is a long polars frame of the rows that pass the screen. `result.values` still holds the full `(T, N)` arrays.
-
-Windows that contain a missing value yield a missing value. That matches the usual Pipeline rule.
 
 ### Batch and live
 

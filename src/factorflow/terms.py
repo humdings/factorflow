@@ -15,6 +15,7 @@ looped one row at a time in both executors, so both run identical code on identi
 
 from __future__ import annotations
 
+import math
 import operator
 from collections.abc import Callable, Sequence
 from typing import Any, ClassVar
@@ -134,7 +135,9 @@ class Term:
         """
         raise NotImplementedError
 
-    def compute_row(self, rows: Sequence[np.ndarray], prev: np.ndarray | None) -> np.ndarray:
+    def compute_row(
+        self, rows: Sequence[np.ndarray], prev: np.ndarray | None
+    ) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
         """Evaluate one row of a row-wise term.
 
         Parameters
@@ -148,8 +151,11 @@ class Term:
 
         Returns
         -------
-        ndarray of shape (N,)
-            The output row.
+        ndarray of shape (N,), or a tuple of that row and a state array
+            The output row. A recursive term whose next step needs more than
+            its own output returns ``(row, state)``. The next call receives
+            ``state`` as ``prev``. Every other term returns the row alone,
+            and a recursive term's row is its state.
 
         Raises
         ------
@@ -177,6 +183,15 @@ def _lift(x: Term | Scalar) -> Term:
     if isinstance(x, Term):
         return x
     return Constant(x)
+
+
+def _fraction(q: float) -> float:
+    if isinstance(q, bool) or not isinstance(q, (int, float)):
+        raise ValueError("quantile must be a fraction in [0, 1]")
+    value = float(q)
+    if not math.isfinite(value) or value < 0.0 or value > 1.0:
+        raise ValueError("quantile must be a fraction in [0, 1]")
+    return value
 
 
 # ====================================================================== kinds
@@ -456,6 +471,17 @@ class Factor(Term):
         """
         return Unary(np.sqrt, "sqrt", self)
 
+    def exp(self) -> Factor:
+        """Raise ``e`` to this factor.
+
+        Returns
+        -------
+        Factor
+            ``exp(self)``. NaN stays NaN. Overflow is inf. Computed on full
+            rows so live and batch take the same path, as :meth:`log` does.
+        """
+        return Unary(np.exp, "exp", self, columnwise=False)
+
     def isnull(self) -> Filter:
         """Test for missing values.
 
@@ -672,6 +698,151 @@ class Factor(Term):
         """
         return Rolling(self, w, "max")
 
+    def rolling_median(self, w: int) -> Factor:
+        """Return the rolling median.
+
+        Parameters
+        ----------
+        w : int
+            Window length in bars (rows), not calendar time. A window that contains a NaN is NaN.
+
+        Returns
+        -------
+        Factor
+            The median. An even window averages the two central order statistics.
+
+        Raises
+        ------
+        ValueError
+            If ``w < 1``.
+        """
+        return Rolling(self, w, "median")
+
+    def rolling_quantile(self, w: int, q: float) -> Factor:
+        """Return a rolling quantile.
+
+        Parameters
+        ----------
+        w : int
+            Window length in bars (rows), not calendar time. A window that contains a NaN is NaN.
+        q : float
+            Fraction in ``[0, 1]``. ``0`` is the minimum, ``1`` is the maximum,
+            and ``0.5`` is the median. A percentile is this fraction times 100.
+
+        Returns
+        -------
+        Factor
+            The linear quantile of each window.
+
+        Raises
+        ------
+        ValueError
+            If ``w < 1`` or ``q`` is outside ``[0, 1]``.
+        """
+        return Rolling(self, w, "quantile", _fraction(q))
+
+    def rolling_skew(self, w: int) -> Factor:
+        """Return the rolling bias-adjusted skewness.
+
+        Parameters
+        ----------
+        w : int
+            Window length in bars. Must be at least 3. A window that contains a NaN is NaN.
+
+        Returns
+        -------
+        Factor
+            Fisher-Pearson skewness. A symmetric window is 0. No dispersion is NaN.
+
+        Raises
+        ------
+        ValueError
+            If ``w < 3``.
+        """
+        return Rolling(self, w, "skew")
+
+    def rolling_kurtosis(self, w: int) -> Factor:
+        """Return the rolling bias-adjusted excess kurtosis.
+
+        Parameters
+        ----------
+        w : int
+            Window length in bars. Must be at least 4. A window that contains a NaN is NaN.
+
+        Returns
+        -------
+        Factor
+            Excess kurtosis. A normal window is 0. No dispersion is NaN.
+
+        Raises
+        ------
+        ValueError
+            If ``w < 4``.
+        """
+        return Rolling(self, w, "kurtosis")
+
+    def rolling_mad(self, w: int) -> Factor:
+        """Return the rolling median absolute deviation.
+
+        Parameters
+        ----------
+        w : int
+            Window length in bars (rows), not calendar time. A window that contains a NaN is NaN.
+
+        Returns
+        -------
+        Factor
+            Median of the absolute deviation from the window median.
+
+        Raises
+        ------
+        ValueError
+            If ``w < 1``.
+        """
+        return Rolling(self, w, "mad")
+
+    def rolling_count(self, w: int) -> Factor:
+        """Return the window length when the window is complete.
+
+        Parameters
+        ----------
+        w : int
+            Window length in bars (rows), not calendar time.
+
+        Returns
+        -------
+        Factor
+            The float ``w`` when every value in the window is finite, otherwise
+            NaN. A missing bar inside the window does not reduce the count; it
+            makes the result missing, the same rule as the other rolling reductions.
+
+        Raises
+        ------
+        ValueError
+            If ``w < 1``.
+        """
+        return Rolling(self, w, "count")
+
+    def rolling_product(self, w: int) -> Factor:
+        """Return the rolling product.
+
+        Parameters
+        ----------
+        w : int
+            Window length in bars (rows), not calendar time. A window that contains a NaN is NaN.
+
+        Returns
+        -------
+        Factor
+            The product, oldest to newest. Overflow is inf.
+
+        Raises
+        ------
+        ValueError
+            If ``w < 1``.
+        """
+        return Rolling(self, w, "product")
+
     def ts_rank(self, w: int) -> Factor:
         """Return the time-series rank of the current value inside the window.
 
@@ -778,6 +949,71 @@ class Factor(Term):
         """
         return EWMMean(self, halflife)
 
+    def ewm_std(self, halflife: float) -> Factor:
+        """Return the exponentially weighted standard deviation.
+
+        Parameters
+        ----------
+        halflife : float
+            Half-life in bars. Must be positive. The same half-life as
+            :meth:`ewm_mean`.
+
+        Returns
+        -------
+        Factor
+            Square root of the bias-included exponentially weighted variance.
+            A NaN observation keeps the previous deviation. The result is NaN
+            until two finite observations have been seen.
+
+        Raises
+        ------
+        ValueError
+            If ``halflife <= 0``.
+        """
+        return EWMStd(self, halflife)
+
+    def cumsum(self) -> Factor:
+        """Return the cumulative sum.
+
+        Returns
+        -------
+        Factor
+            The running sum. It starts at the first finite value. A NaN keeps
+            the sum instead of wiping it. Overflow is inf and stays inf.
+        """
+        return Cumulative(self, "sum")
+
+    def cumprod(self) -> Factor:
+        """Return the cumulative product.
+
+        Returns
+        -------
+        Factor
+            The running product. It starts at the first finite value. A NaN
+            keeps the product. Overflow is inf and stays inf.
+        """
+        return Cumulative(self, "prod")
+
+    def cummin(self) -> Factor:
+        """Return the cumulative minimum.
+
+        Returns
+        -------
+        Factor
+            The smallest finite value seen so far. A NaN keeps the minimum.
+        """
+        return Cumulative(self, "min")
+
+    def cummax(self) -> Factor:
+        """Return the cumulative maximum.
+
+        Returns
+        -------
+        Factor
+            The largest finite value seen so far. A NaN keeps the maximum.
+        """
+        return Cumulative(self, "max")
+
     # cross-sectional
     def rank(
         self, *, mask: Filter | None = None, groupby: Classifier | None = None, ascending: bool = True
@@ -834,6 +1070,243 @@ class Factor(Term):
             ``x - group mean``. A group of one becomes 0.
         """
         return CrossSection(self, "demean", mask, groupby)
+
+    def mean(self, *, mask: Filter | None = None, groupby: Classifier | None = None) -> Factor:
+        """Broadcast the cross-sectional mean on this bar.
+
+        Parameters
+        ----------
+        mask : Filter or None, optional
+            Who is eligible. ``None`` uses every finite value. Default is ``None``.
+        groupby : Classifier or None, optional
+            Group codes. ``None`` is one group. ``-1`` is missing and is dropped. Default is ``None``.
+
+        Returns
+        -------
+        Factor
+            The group mean, repeated on every eligible asset. A trailing mean
+            is :meth:`rolling_mean`.
+        """
+        return CrossSection(self, "mean", mask, groupby)
+
+    def sum(self, *, mask: Filter | None = None, groupby: Classifier | None = None) -> Factor:
+        """Broadcast the cross-sectional sum on this bar.
+
+        Parameters
+        ----------
+        mask : Filter or None, optional
+            Who is eligible. ``None`` uses every finite value. Default is ``None``.
+        groupby : Classifier or None, optional
+            Group codes. ``None`` is one group. ``-1`` is missing and is dropped. Default is ``None``.
+
+        Returns
+        -------
+        Factor
+            The group sum, in column order, repeated on every eligible asset.
+        """
+        return CrossSection(self, "sum", mask, groupby)
+
+    def median(self, *, mask: Filter | None = None, groupby: Classifier | None = None) -> Factor:
+        """Broadcast the cross-sectional median on this bar.
+
+        Parameters
+        ----------
+        mask : Filter or None, optional
+            Who is eligible. ``None`` uses every finite value. Default is ``None``.
+        groupby : Classifier or None, optional
+            Group codes. ``None`` is one group. ``-1`` is missing and is dropped. Default is ``None``.
+
+        Returns
+        -------
+        Factor
+            The median of the eligible assets. An even count averages the two
+            central values. A trailing median is :meth:`rolling_median`.
+        """
+        return CrossSection(self, "median", mask, groupby)
+
+    def std(self, *, mask: Filter | None = None, groupby: Classifier | None = None) -> Factor:
+        """Broadcast the cross-sectional sample standard deviation on this bar.
+
+        Parameters
+        ----------
+        mask : Filter or None, optional
+            Who is eligible. ``None`` uses every finite value. Default is ``None``.
+        groupby : Classifier or None, optional
+            Group codes. ``None`` is one group. ``-1`` is missing and is dropped. Default is ``None``.
+
+        Returns
+        -------
+        Factor
+            Sample standard deviation, divisor ``count - 1``. A group with
+            fewer than two values is NaN. Zero dispersion is 0.
+        """
+        return CrossSection(self, "std", mask, groupby)
+
+    def var(self, *, mask: Filter | None = None, groupby: Classifier | None = None) -> Factor:
+        """Broadcast the cross-sectional sample variance on this bar.
+
+        Parameters
+        ----------
+        mask : Filter or None, optional
+            Who is eligible. ``None`` uses every finite value. Default is ``None``.
+        groupby : Classifier or None, optional
+            Group codes. ``None`` is one group. ``-1`` is missing and is dropped. Default is ``None``.
+
+        Returns
+        -------
+        Factor
+            Sample variance, divisor ``count - 1``. A group with fewer than
+            two values is NaN.
+        """
+        return CrossSection(self, "var", mask, groupby)
+
+    def min(self, *, mask: Filter | None = None, groupby: Classifier | None = None) -> Factor:
+        """Broadcast the cross-sectional minimum on this bar.
+
+        Parameters
+        ----------
+        mask : Filter or None, optional
+            Who is eligible. ``None`` uses every finite value. Default is ``None``.
+        groupby : Classifier or None, optional
+            Group codes. ``None`` is one group. ``-1`` is missing and is dropped. Default is ``None``.
+
+        Returns
+        -------
+        Factor
+            The smallest eligible value, repeated on every eligible asset.
+        """
+        return CrossSection(self, "min", mask, groupby)
+
+    def max(self, *, mask: Filter | None = None, groupby: Classifier | None = None) -> Factor:
+        """Broadcast the cross-sectional maximum on this bar.
+
+        Parameters
+        ----------
+        mask : Filter or None, optional
+            Who is eligible. ``None`` uses every finite value. Default is ``None``.
+        groupby : Classifier or None, optional
+            Group codes. ``None`` is one group. ``-1`` is missing and is dropped. Default is ``None``.
+
+        Returns
+        -------
+        Factor
+            The largest eligible value, repeated on every eligible asset.
+        """
+        return CrossSection(self, "max", mask, groupby)
+
+    def quantile(self, q: float, *, mask: Filter | None = None, groupby: Classifier | None = None) -> Factor:
+        """Broadcast a cross-sectional quantile on this bar.
+
+        Parameters
+        ----------
+        q : float
+            Fraction in ``[0, 1]``. ``0.5`` is the median. A percentile is this
+            fraction times 100.
+        mask : Filter or None, optional
+            Who is eligible. ``None`` uses every finite value. Default is ``None``.
+        groupby : Classifier or None, optional
+            Group codes. ``None`` is one group. ``-1`` is missing and is dropped. Default is ``None``.
+
+        Returns
+        -------
+        Factor
+            The linear quantile of the eligible assets, repeated on each of them.
+
+        Raises
+        ------
+        ValueError
+            If ``q`` is outside ``[0, 1]``.
+        """
+        return CrossSection(self, "quantile", mask, groupby, q=_fraction(q))
+
+    def skew(self, *, mask: Filter | None = None, groupby: Classifier | None = None) -> Factor:
+        """Broadcast the cross-sectional bias-adjusted skewness on this bar.
+
+        Parameters
+        ----------
+        mask : Filter or None, optional
+            Who is eligible. ``None`` uses every finite value. Default is ``None``.
+        groupby : Classifier or None, optional
+            Group codes. ``None`` is one group. ``-1`` is missing and is dropped. Default is ``None``.
+
+        Returns
+        -------
+        Factor
+            Fisher-Pearson skewness of the group. Fewer than three values, or
+            no dispersion, is NaN.
+        """
+        return CrossSection(self, "skew", mask, groupby)
+
+    def kurtosis(self, *, mask: Filter | None = None, groupby: Classifier | None = None) -> Factor:
+        """Broadcast the cross-sectional bias-adjusted excess kurtosis on this bar.
+
+        Parameters
+        ----------
+        mask : Filter or None, optional
+            Who is eligible. ``None`` uses every finite value. Default is ``None``.
+        groupby : Classifier or None, optional
+            Group codes. ``None`` is one group. ``-1`` is missing and is dropped. Default is ``None``.
+
+        Returns
+        -------
+        Factor
+            Excess kurtosis of the group. A normal group is 0. Fewer than four
+            values, or no dispersion, is NaN.
+        """
+        return CrossSection(self, "kurtosis", mask, groupby)
+
+    def mad(self, *, mask: Filter | None = None, groupby: Classifier | None = None) -> Factor:
+        """Broadcast the cross-sectional median absolute deviation on this bar.
+
+        Parameters
+        ----------
+        mask : Filter or None, optional
+            Who is eligible. ``None`` uses every finite value. Default is ``None``.
+        groupby : Classifier or None, optional
+            Group codes. ``None`` is one group. ``-1`` is missing and is dropped. Default is ``None``.
+
+        Returns
+        -------
+        Factor
+            Median of the absolute deviation from the group median. A group of
+            one is 0.
+        """
+        return CrossSection(self, "mad", mask, groupby)
+
+    def count(self, *, mask: Filter | None = None, groupby: Classifier | None = None) -> Factor:
+        """Broadcast how many assets entered the cross-section.
+
+        Parameters
+        ----------
+        mask : Filter or None, optional
+            Who is eligible. ``None`` uses every finite value. Default is ``None``.
+        groupby : Classifier or None, optional
+            Group codes. ``None`` is one group. ``-1`` is missing and is dropped. Default is ``None``.
+
+        Returns
+        -------
+        Factor
+            The number of eligible assets in the group. An asset that is missing
+            or masked is not counted and receives NaN.
+        """
+        return CrossSection(self, "count", mask, groupby)
+
+    def product(self, *, mask: Filter | None = None, groupby: Classifier | None = None) -> Factor:
+        """Broadcast the cross-sectional product on this bar.
+
+        Parameters
+        ----------
+        mask : Filter or None, optional
+            Who is eligible. ``None`` uses every finite value. Default is ``None``.
+        groupby : Classifier or None, optional
+            Group codes. ``None`` is one group. ``-1`` is missing and is dropped. Default is ``None``.
+
+        Returns
+        -------
+        Factor
+            The product of the eligible values, in column order. Overflow is inf.
+        """
+        return CrossSection(self, "product", mask, groupby)
 
     def top(self, n: int, *, mask: Filter | None = None, groupby: Classifier | None = None) -> Filter:
         """Keep the ``n`` largest values.
@@ -1264,7 +1737,7 @@ class BinOp(_Elementwise, Factor):
 
 
 class Unary(Factor):
-    """Elementwise unary node, such as ``log``, ``sqrt``, ``neg``, or ``abs``."""
+    """Elementwise unary node, such as ``log``, ``exp``, ``sqrt``, ``neg``, or ``abs``."""
 
     def __init__(self, fn: Callable, name: str, a: Factor, columnwise: bool = True):
         """Bind the function.
@@ -1278,8 +1751,8 @@ class Unary(Factor):
         a : Factor
             The input.
         columnwise : bool, optional
-            ``False`` for ``log``, which is always computed on full rows so
-            live and batch take the same path. Default is ``True``.
+            ``False`` for ``log`` and ``exp``. Those ufuncs are always computed
+            on full rows so live and batch take the same path. Default is ``True``.
         """
         self.fn, self.inputs, self.params = fn, (a,), (name,)
         # transcendental ufuncs may take different SIMD paths for different array lengths,
@@ -1622,14 +2095,35 @@ _ROLLING = {
     "std": K.wstd,
     "min": K.wmin,
     "max": K.wmax,
+    "median": K.wmedian,
+    "skew": K.wskew,
+    "kurtosis": K.wkurtosis,
+    "mad": K.wmad,
+    "count": K.wcount,
+    "product": K.wprod,
     "tsrank": K.wtsrank,
+}
+_ROLLING_MIN = {"var": 2, "std": 2, "skew": 3, "kurtosis": 4}
+_CROSS = {
+    "mean": K.cs_mean,
+    "sum": K.cs_sum,
+    "median": K.cs_median,
+    "std": K.cs_std,
+    "var": K.cs_var,
+    "min": K.cs_min,
+    "max": K.cs_max,
+    "skew": K.cs_skew,
+    "kurtosis": K.cs_kurtosis,
+    "mad": K.cs_mad,
+    "count": K.cs_count,
+    "product": K.cs_product,
 }
 
 
 class Rolling(Factor):
     """A one-input rolling window. Built by the ``rolling_*`` and :meth:`Factor.ts_rank` methods."""
 
-    def __init__(self, a: Factor, w: int, how: str):
+    def __init__(self, a: Factor, w: int, how: str, q: float | None = None):
         """Store the input, the window, and which reduction to run.
 
         Parameters
@@ -1639,18 +2133,28 @@ class Rolling(Factor):
         w : int
             Window length in bars.
         how : str
-            One of ``sum``, ``mean``, ``var``, ``std``, ``min``, ``max``, ``tsrank``.
+            One of ``sum``, ``mean``, ``var``, ``std``, ``min``, ``max``,
+            ``median``, ``quantile``, ``skew``, ``kurtosis``, ``mad``,
+            ``count``, ``product``, ``tsrank``.
+        q : float or None, optional
+            Quantile fraction. Required when ``how`` is ``quantile``.
 
         Raises
         ------
         ValueError
-            If ``w < 1``, or if a variance or standard deviation has ``w < 2``.
+            If ``w`` is below the minimum for ``how``, or a quantile is missing.
         """
-        if w < 1:
-            raise ValueError("window must be >= 1")
-        if how in ("var", "std") and w < 2:
-            raise ValueError(f"rolling_{how} needs a window >= 2")
-        self.inputs, self.window, self.params, self.how = (a,), int(w), (how,), how
+        need = _ROLLING_MIN.get(how, 1)
+        if w < need:
+            raise ValueError(f"rolling_{how} needs a window >= {need}")
+        if how == "quantile":
+            if q is None:
+                raise ValueError("rolling_quantile needs a quantile")
+            q = float(q)
+            self.params = (how, q)
+        else:
+            self.params = (how,)
+        self.inputs, self.window, self.how, self.q = (a,), int(w), how, q
 
     __hash__ = Term.__hash__
 
@@ -1669,6 +2173,10 @@ class Rolling(Factor):
         ndarray of shape (T_in - w + 1, N)
             The reduction. Same function batch and live call.
         """
+        if self.how == "quantile":
+            if self.q is None:  # pragma: no cover - the constructor rejects this
+                raise ValueError("rolling_quantile needs a quantile")
+            return K.wquantile(blocks[0], self.window, self.q)
         return _ROLLING[self.how](blocks[0], self.window)
 
 
@@ -1850,11 +2358,97 @@ class EWMMean(Factor):
         return K.ewm_step(rows[0][-1], p, self.alpha)
 
 
+class EWMStd(Factor):
+    """Exponentially weighted standard deviation with a half-life in bars."""
+
+    rowwise = True
+    recursive = True
+
+    def __init__(self, a: Factor, halflife: float):
+        """Store the half-life and the matching smoothing weight.
+
+        Parameters
+        ----------
+        a : Factor
+            The input.
+        halflife : float
+            Half-life in bars. Must be positive.
+
+        Raises
+        ------
+        ValueError
+            If ``halflife <= 0``.
+        """
+        if halflife <= 0:
+            raise ValueError("halflife must be > 0")
+        self.inputs, self.params = (a,), (float(halflife),)
+        self.alpha = K.ewm_alpha(float(halflife))
+
+    __hash__ = Term.__hash__
+
+    def compute_row(self, rows, prev):
+        """Advance the deviation by one row.
+
+        Parameters
+        ----------
+        rows : sequence of ndarray
+            The input window. The last row is the new observation.
+        prev : ndarray of shape (3, N) or None
+            Previous mean, variance, and count. ``None`` starts the series.
+
+        Returns
+        -------
+        tuple of ndarray
+            The standard deviation, shape ``(N,)``, and the state, shape ``(3, N)``.
+        """
+        return K.ewm_std_step(rows[0][-1], prev, self.alpha)
+
+
+class Cumulative(Factor):
+    """A running sum, product, minimum, or maximum. A missing observation keeps the previous value."""
+
+    rowwise = True
+    recursive = True
+
+    def __init__(self, a: Factor, how: str):
+        """Store the reduction.
+
+        Parameters
+        ----------
+        a : Factor
+            The input.
+        how : str
+            ``sum``, ``prod``, ``min``, or ``max``.
+        """
+        self.inputs, self.params, self.how = (a,), (how,), how
+
+    __hash__ = Term.__hash__
+
+    def compute_row(self, rows, prev):
+        """Advance the running value by one row.
+
+        Parameters
+        ----------
+        rows : sequence of ndarray
+            The input window. The last row is the new observation.
+        prev : ndarray of shape (N,) or None
+            Previous cumulative value. ``None`` starts at the observation.
+
+        Returns
+        -------
+        ndarray of shape (N,)
+            The updated value. A NaN observation keeps ``prev``.
+        """
+        return K.cum_step(rows[0][-1], prev, self.how)
+
+
 # ====================================================================== cross-sectional
 class CrossSection(Factor):
-    """Rank, z-score, or demean across assets.
+    """A reduction across assets on one bar.
 
-    Built by :meth:`Factor.rank`, :meth:`Factor.zscore`, and :meth:`Factor.demean`.
+    Built by :meth:`Factor.rank`, :meth:`Factor.zscore`, :meth:`Factor.demean`,
+    and the other cross-sectional reductions (:meth:`Factor.mean`,
+    :meth:`Factor.median`, :meth:`Factor.quantile`, and the rest).
 
     Notes
     -----
@@ -1866,7 +2460,13 @@ class CrossSection(Factor):
     columnwise = False
 
     def __init__(
-        self, a: Factor, how: str, mask: Filter | None, groupby: Classifier | None, ascending: bool = True
+        self,
+        a: Factor,
+        how: str,
+        mask: Filter | None,
+        groupby: Classifier | None,
+        ascending: bool = True,
+        q: float | None = None,
     ):
         """Bind the reduction and the optional mask and groups.
 
@@ -1875,15 +2475,18 @@ class CrossSection(Factor):
         a : Factor
             Values to reduce.
         how : str
-            ``rank``, ``zscore``, or ``demean``.
+            ``rank``, ``zscore``, ``demean``, or a broadcast statistic such as
+            ``mean``, ``median``, or ``quantile``.
         mask : Filter or None
             Who is eligible.
         groupby : Classifier or None
             Group codes.
         ascending : bool, optional
-            Rank direction. Ignored by z-score and demean. Default is ``True``.
+            Rank direction. Ignored except by rank. Default is ``True``.
+        q : float or None, optional
+            Quantile fraction when ``how`` is ``quantile``.
         """
-        self.how, self.ascending = how, ascending
+        self.how, self.ascending, self.q = how, ascending, q
         self.has_mask, self.has_groups = mask is not None, groupby is not None
         ins: list[Term] = [a]
         if mask is not None:
@@ -1891,7 +2494,7 @@ class CrossSection(Factor):
         if groupby is not None:
             ins.append(groupby)
         self.inputs = tuple(ins)
-        self.params = (how, ascending, self.has_mask, self.has_groups)
+        self.params = (how, ascending, self.has_mask, self.has_groups, q)
 
     __hash__ = Term.__hash__
 
@@ -1908,7 +2511,7 @@ class CrossSection(Factor):
         Returns
         -------
         ndarray of shape (N,)
-            The rank, z-score, or demeaned value. Ineligible assets are NaN.
+            The reduction. Ineligible assets are NaN.
         """
         it = iter(r[-1] for r in rows)
         v = next(it)
@@ -1918,4 +2521,10 @@ class CrossSection(Factor):
             return K.cs_rank(v, mask, groups, self.ascending)
         if self.how == "zscore":
             return K.cs_zscore(v, mask, groups)
-        return K.cs_demean(v, mask, groups)
+        if self.how == "demean":
+            return K.cs_demean(v, mask, groups)
+        if self.how == "quantile":
+            if self.q is None:  # pragma: no cover - the constructor stores a fraction
+                raise ValueError("quantile needs a fraction")
+            return K.cs_quantile(v, mask, groups, self.q)
+        return _CROSS[self.how](v, mask, groups)

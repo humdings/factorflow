@@ -242,6 +242,9 @@ class LiveEngine:
         self.prev: dict[Term, np.ndarray | None] = {
             t: warm.recursive_state.get(t) for t in g.order if t.recursive
         }
+        # State from the latest open-row evaluation of a recursive term that
+        # keeps more than its output. Committed in :meth:`seal`, not in revise.
+        self._hold_state: dict[Term, np.ndarray] = {}
         self._consumers_window = g.lookback
 
         # open-row inputs
@@ -416,7 +419,12 @@ class LiveEngine:
                     continue
             if t.rowwise:
                 rows = [self.bufs[i].window(1) for i in t.inputs]
-                new = t.compute_row(rows, self.prev.get(t))
+                produced = t.compute_row(rows, self.prev.get(t))
+                if isinstance(produced, tuple):
+                    new, state = produced
+                    self._hold_state[t] = state
+                else:
+                    new = produced
                 cols = None
             else:
                 w = t.window
@@ -514,7 +522,8 @@ class LiveEngine:
         snap = self._snapshot(changed, False, ts)
         for t in self.graph.order:
             if t.recursive:
-                self.prev[t] = self.bufs[t].open.copy()
+                held = self._hold_state.get(t)
+                self.prev[t] = self.bufs[t].open.copy() if held is None else np.array(held, copy=True)
             self.bufs[t].seal()
         self.last_sealed_ts = int(ts)
         self.bar.start(self.bar.f["close"].copy())
